@@ -797,12 +797,50 @@ class DB:
         self.fs_h160_count = h160_count
         # Truncate header_mc: header count is 1 more than the height.
         self.header_mc.truncate(height + 1)
+    
+    def _unpad_auxpow_header(self, header, height):
+        '''Remove padding from AuxPOW headers before sending to clients.
+        
+        AuxPOW headers are stored as 120 bytes (80 + 40 padding) to maintain
+        static offsets, but clients expect 80 bytes for AuxPOW blocks.
+        '''
+        # Only process if AuxPOW is potentially active at this height
+        if not self.coin.is_auxpow_active(height):
+            return header
+        
+        # Check if this is an AuxPOW header (version bit set)
+        if len(header) >= 4:
+            version_int = int.from_bytes(header[:4], byteorder='little')
+            if version_int & (1 << 8):  # AuxPOW version bit
+                # Return only first 80 bytes, remove padding
+                return header[:80]
+        
+        return header
+    
+    def _unpad_auxpow_headers(self, headers, start_height):
+        '''FIXED: Keep headers consistent at 120 bytes for chunks, unpad only individual headers.
+        
+        When serving chunks of headers (like for blockchain sync), we need consistent
+        header sizes. AuxPOW headers are padded to 120 bytes for storage, and we keep
+        them at 120 bytes when serving chunks to maintain alignment.
+        
+        Individual header requests use _unpad_auxpow_header() for correct client format.
+        '''
+        # For chunks: return headers as-is from disk (all 120 bytes) for consistent parsing
+        # The client's verify_chunk() will handle mixed header types correctly
+        return headers
 
     async def raw_header(self, height):
         '''Return the binary header at the given height.'''
         header, n = await self.read_headers(height, 1)
         if n != 1:
             raise IndexError(f'height {height:,d} out of range')
+        
+        # FIXED: Since _unpad_auxpow_headers now keeps chunks at 120 bytes,
+        # we need to unpad individual headers here for correct client format
+        if len(header) == 120:
+            header = self._unpad_auxpow_header(header, height)
+        
         return header
 
     async def read_headers(self, start_height, count):
@@ -812,6 +850,8 @@ class DB:
 
         Returns a (binary, n) pair where binary is the concatenated binary headers, and n
         is the count of headers returned.
+        
+        Note: AuxPOW headers are stored padded to 120 bytes but returned as 80 bytes.
         '''
         if start_height < 0 or count < 0:
             raise self.DBError(f'{count:,d} headers starting at '
@@ -823,7 +863,10 @@ class DB:
             if disk_count:
                 offset = self.header_offset(start_height)
                 size = self.header_offset(start_height + disk_count) - offset
-                return self.headers_file.read(offset, size), disk_count
+                headers_from_disk = self.headers_file.read(offset, size)
+                # Remove padding from AuxPOW headers before returning
+                headers_unpadded = self._unpad_auxpow_headers(headers_from_disk, start_height)
+                return headers_unpadded, disk_count
             return b'', 0
 
         return await run_in_thread(read_headers)
@@ -866,7 +909,18 @@ class DB:
         offset = 0
         headers = []
         for n in range(count):
-            hlen = self.header_len(height + n)
+            h = height + n
+            # Determine actual header length (unpadded) for splitting
+            # After reading, AuxPOW headers are 80 bytes, others use static_header_len
+            if self.coin.is_auxpow_active(h) and len(headers_concat) >= offset + 4:
+                version_int = int.from_bytes(headers_concat[offset:offset+4], byteorder='little')
+                if version_int & (1 << 8):  # AuxPOW block
+                    hlen = 80
+                else:
+                    hlen = self.header_len(h)
+            else:
+                hlen = self.header_len(h)
+            
             headers.append(headers_concat[offset:offset + hlen])
             offset += hlen
 

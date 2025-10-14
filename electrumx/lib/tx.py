@@ -168,12 +168,14 @@ class DeserializerAuxPow(Deserializer):
         self.cursor = start
         return self._read_nbytes(end - start)
 
-    def read_header(self, static_header_size):
+    def read_header(self, static_header_size, height=None):
         '''Return ONLY basic header for Electrum compatibility'''
         
         start = self.cursor
         version = self._read_le_uint32()
         
+        # Only treat as AuxPOW if the version bit is set
+        # Note: The calling code should already have verified AuxPOW is active at this height
         if version & self.VERSION_AUXPOW:
             # FIXED: For AuxPoW, return only basic header (80 bytes) for compatibility
             # AuxPoW data is not needed for SPV validation

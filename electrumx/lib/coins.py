@@ -71,18 +71,21 @@ class AuxPowMixin:
     @classmethod
     def block_header(cls, block, height):
         '''Return the block header bytes - truncated for Electrum compatibility'''
-        # Check if this is an AuxPOW block
-        version_int = int.from_bytes(block[:4], byteorder='little')
-        is_auxpow = bool(version_int & (1 << 8))  # VERSION_AUXPOW
+        # Check if AuxPOW is active at this height first
+        if cls.is_auxpow_active(height):
+            # Check if this is an AuxPOW block
+            version_int = int.from_bytes(block[:4], byteorder='little')
+            is_auxpow = bool(version_int & (1 << 8))  # VERSION_AUXPOW
+            
+            if is_auxpow:
+                # FIXED: Return only basic header (80 bytes) for Electrum compatibility
+                # AuxPoW data is not needed for SPV validation
+                # Note: Padding to 120 bytes happens in block_processor before storage
+                return block[:cls.BASIC_HEADER_SIZE]
         
-        if is_auxpow:
-            # FIXED: Return only basic header (80 bytes) for Electrum compatibility
-            # AuxPoW data is not needed for SPV validation
-            return block[:cls.BASIC_HEADER_SIZE]
-        else:
-            # For non-AuxPOW blocks, use static header length
-            header_size = cls.static_header_len(height)
-            return block[:header_size]
+        # For non-AuxPOW blocks or when AuxPOW is not active, use static header length
+        header_size = cls.static_header_len(height)
+        return block[:header_size]
 
 
 class Coin:
@@ -183,6 +186,11 @@ class Coin:
     def hashX_from_script(cls, script):
         '''Returns a hashX from a script.'''
         return sha256(script).digest()[:HASHX_LEN]
+    
+    @classmethod
+    def is_auxpow_active(cls, height):
+        '''Check if AuxPOW is active at the given height. Base implementation returns False.'''
+        return False
 
     @classmethod
     def address_to_hashX(cls, address):
@@ -236,24 +244,26 @@ class Coin:
     @classmethod
     def block(cls, raw_block, height):
         '''Return a Block namedtuple given a raw block and its height.'''
-        # Check if this is an AuxPOW block first
-        version_int = int.from_bytes(raw_block[:4], byteorder='little')
-        is_auxpow = bool(version_int & (1 << 8))  # VERSION_AUXPOW
+        # Check if AuxPOW is active at this height first
+        if cls.is_auxpow_active(height):
+            # Check if this is an AuxPOW block
+            version_int = int.from_bytes(raw_block[:4], byteorder='little')
+            is_auxpow = bool(version_int & (1 << 8))  # VERSION_AUXPOW
+            
+            if is_auxpow:
+                # CRITICAL FIX: Use AuxPOW deserializer for both header and transactions
+                # Regular deserializer can't handle AuxPoW block structure correctly
+                auxpow_deserializer = cls.DESERIALIZER(raw_block)
+                header = auxpow_deserializer.read_header(cls.BASIC_HEADER_SIZE, height)
+                # Now deserializer cursor is positioned correctly after AuxPoW data
+                txs = auxpow_deserializer.read_tx_block()
+                return Block(raw_block, header, txs)
         
-        if is_auxpow:
-            # CRITICAL FIX: Use AuxPOW deserializer for both header and transactions
-            # Regular deserializer can't handle AuxPoW block structure correctly
-            auxpow_deserializer = cls.DESERIALIZER(raw_block)
-            header = auxpow_deserializer.read_header(cls.BASIC_HEADER_SIZE)
-            # Now deserializer cursor is positioned correctly after AuxPoW data
-            txs = auxpow_deserializer.read_tx_block()
-            return Block(raw_block, header, txs)
-        else:
-            # Use regular deserializer for non-AuxPOW blocks
-            header_size = cls.static_header_len(height)
-            header = raw_block[:header_size]
-            txs = lib_tx.Deserializer(raw_block, start=header_size).read_tx_block()
-            return Block(raw_block, header, txs)
+        # Use regular deserializer for non-AuxPOW blocks or when AuxPOW is not active
+        header_size = cls.static_header_len(height)
+        header = raw_block[:header_size]
+        txs = lib_tx.Deserializer(raw_block, start=header_size).read_tx_block()
+        return Block(raw_block, header, txs)
 
     @classmethod
     def decimal_value(cls, value):
@@ -350,6 +360,11 @@ class Meowcoin(AuxPowMixin, Coin):
     def is_auxpow_block(cls, version_int):
         '''Check if block version indicates AuxPOW block'''
         return bool(version_int & cls.VERSION_AUXPOW)
+    
+    @classmethod
+    def is_auxpow_active(cls, height):
+        '''Check if AuxPOW is active at the given height'''
+        return height >= cls.AUXPOW_ACTIVATION_HEIGHT
 
     @classmethod
     def static_header_offset(cls, height):
@@ -361,7 +376,7 @@ class Meowcoin(AuxPowMixin, Coin):
 
     @classmethod
     def header_hash(cls, header):
-        '''Given a header return the hash - always use first 80 bytes for consistency.'''
+        '''Given a header return the hash - use proper algorithm based on height and version.'''
         # Extract version to check for AuxPOW
         version_int = util.unpack_le_uint32_from(header, 0)[0]
         
@@ -369,7 +384,10 @@ class Meowcoin(AuxPowMixin, Coin):
         basic_header = header[:80]
         timestamp = util.unpack_le_uint32_from(basic_header, 68)[0]
         
-        # CRITICAL FIX: AuxPoW blocks use Scrypt, regardless of timestamp
+        # NOTE: We can't check height in header_hash() as we don't have it available.
+        # This function should only be called with headers that have been properly
+        # validated during block processing. The AuxPOW version bit should only be
+        # set on blocks at or after AUXPOW_ACTIVATION_HEIGHT.
         if cls.is_auxpow_block(version_int):
             # AuxPoW blocks always use Scrypt-1024-1-1-256 on basic header (80 bytes)
             # This matches CPureBlockHeader::GetHash() in Meowcoin source
@@ -439,7 +457,7 @@ class MeowcoinTestnet(Meowcoin):
     CHAIN_SIZE_HEIGHT = 1_048_377
     AVG_BLOCK_SIZE = 400
 
-    RPC_PORT = 4568  # Testnet RPC port from config
+    RPC_PORT = 18766  # Testnet RPC port (P2P port is 4569)
     PEERS = []
 
 
@@ -462,5 +480,5 @@ class MeowcoinRegtest(Meowcoin):
     CHAIN_SIZE_HEIGHT = 10000
     AVG_BLOCK_SIZE = 400
 
-    RPC_PORT = 19766  # Regtest RPC port
+    RPC_PORT = 18443  # Regtest RPC port
     PEERS = []

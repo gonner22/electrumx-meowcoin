@@ -789,6 +789,10 @@ class BlockProcessor:
             # Parse the block using the coin's deserializer
             parsed_block = self.coin.block(complete_raw_block, raw_block.height)
             
+            # Update block.header with the correctly parsed header
+            # This is crucial for AuxPOW blocks where header size may differ from static size
+            block.header = parsed_block.header
+            
             if self.coin.header_prevhash(parsed_block.header) != self.state.tip:
                 self.reorg_count = -1
                 return
@@ -1288,7 +1292,13 @@ class BlockProcessor:
             self.verifier_history_undos.append((internal_verifier_history_undo_info, block.height))
             self.associations_undos.append((internal_association_undo_info, block.height))
             self.association_history_undos.append((internal_association_history_undo_info, block.height))
-        self.headers.append(block.header)
+        
+        # CRITICAL: Pad AuxPOW headers to 120 bytes for storage to maintain static offsets
+        header_to_store = block.header
+        if (self.coin.is_auxpow_active(block.height) and len(block.header) == 80):
+            # AuxPOW header (80 bytes) - pad to 120 for consistent disk storage
+            header_to_store = block.header + bytes(40)
+        self.headers.append(header_to_store)
         
         #Update State
         state.height = block.height
@@ -1461,7 +1471,15 @@ class BlockProcessor:
 
         count = 0
         utxo_count_delta = 0
-        with block as block:
+        with block as raw_block:
+            # Read the complete raw block data to parse header correctly
+            raw_block.block_file.seek(0)
+            complete_raw_block = raw_block.block_file.read()
+            
+            # Parse the block to get the correctly formatted header
+            # This is crucial for AuxPOW blocks where header size may differ from static size
+            parsed_block = self.coin.block(complete_raw_block, raw_block.height)
+            block.header = parsed_block.header
             self.ok = False
             for tx, tx_hash in block.iter_txs_reversed():
                 for idx, txout in enumerate(tx.outputs):
