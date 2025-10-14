@@ -389,10 +389,15 @@ class Meowcoin(AuxPowMixin, Coin):
         # validated during block processing. The AuxPOW version bit should only be
         # set on blocks at or after AUXPOW_ACTIVATION_HEIGHT.
         if cls.is_auxpow_block(version_int):
-            # CRITICAL FIX: AuxPoW blocks use double SHA256, not Scrypt
-            # The mining work was already done on parent chain (Litecoin)
-            # AuxPOW headers are just validation markers, not mining targets
-            return double_sha256(basic_header)
+            # AuxPoW blocks always use Scrypt-1024-1-1-256 on basic header (80 bytes)
+            # This matches CPureBlockHeader::GetHash() in Meowcoin source
+            import hashlib
+            try:
+                # Use hashlib.scrypt (available in Python 3.6+)
+                return hashlib.scrypt(basic_header, salt=basic_header, n=1024, r=1, p=1, dklen=32)
+            except AttributeError:
+                # Fallback if scrypt not available
+                return double_sha256(basic_header)
         
         # For non-AuxPoW blocks, algorithm selection based on timestamp
         if len(header) >= cls.KAWPOW_HEADER_SIZE and timestamp >= cls.MEOWPOW_ACTIVATION_TIME:
