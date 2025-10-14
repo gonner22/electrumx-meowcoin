@@ -818,29 +818,41 @@ class DB:
         return header
     
     def _unpad_auxpow_headers(self, headers, start_height):
-        '''FIXED: Keep headers consistent at 120 bytes for chunks, unpad only individual headers.
+        '''Remove padding from multiple concatenated AuxPOW headers.
         
-        When serving chunks of headers (like for blockchain sync), we need consistent
-        header sizes. AuxPOW headers are padded to 120 bytes for storage, and we keep
-        them at 120 bytes when serving chunks to maintain alignment.
-        
-        Individual header requests use _unpad_auxpow_header() for correct client format.
+        CRITICAL FIX: Process headers sequentially, maintaining correct alignment
+        when mixing AuxPOW (80 bytes) and MeowPow (120 bytes) headers.
         '''
-        # For chunks: return headers as-is from disk (all 120 bytes) for consistent parsing
-        # The client's verify_chunk() will handle mixed header types correctly
-        return headers
+        result = b''
+        p = 0
+        h = start_height
+        
+        while p < len(headers):
+            # Each header in file is 120 bytes (after KAWPOW activation)
+            if h >= self.coin.KAWPOW_ACTIVATION_HEIGHT:
+                header_in_file = headers[p:p + 120]
+                p += 120
+            else:
+                header_in_file = headers[p:p + 80]
+                p += 80
+            
+            # Check if we have enough data
+            if len(header_in_file) < (120 if h >= self.coin.KAWPOW_ACTIVATION_HEIGHT else 80):
+                break
+                
+            # Unpad if needed - this will return 80 bytes for AuxPOW, 120 for others
+            header_to_send = self._unpad_auxpow_header(header_in_file, h)
+            result += header_to_send
+            h += 1
+        
+        return result
 
     async def raw_header(self, height):
         '''Return the binary header at the given height.'''
         header, n = await self.read_headers(height, 1)
         if n != 1:
             raise IndexError(f'height {height:,d} out of range')
-        
-        # FIXED: Since _unpad_auxpow_headers now keeps chunks at 120 bytes,
-        # we need to unpad individual headers here for correct client format
-        if len(header) == 120:
-            header = self._unpad_auxpow_header(header, height)
-        
+        # Note: read_headers() already removes padding via _unpad_auxpow_headers
         return header
 
     async def read_headers(self, start_height, count):
@@ -851,7 +863,7 @@ class DB:
         Returns a (binary, n) pair where binary is the concatenated binary headers, and n
         is the count of headers returned.
         
-        Note: AuxPOW headers are stored padded to 120 bytes but returned as 80 bytes.
+        Note: AuxPOW headers are stored padded to 120 bytes but returned as 80 bytes for client compatibility.
         '''
         if start_height < 0 or count < 0:
             raise self.DBError(f'{count:,d} headers starting at '
