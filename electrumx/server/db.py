@@ -902,20 +902,10 @@ class DB:
                 offset = self.header_offset(start_height)
                 size = self.header_offset(start_height + disk_count) - offset
                 
-                if start_height == 1620864:
-                    self.logger.info(f'DEBUG read_headers: offset={offset}, size={size}')
-                    self.logger.info(f'DEBUG read_headers: size/120={size//120} full headers')
-                
                 headers_from_disk = self.headers_file.read(offset, size)
-                
-                if start_height == 1620864:
-                    self.logger.info(f'DEBUG read_headers: read {len(headers_from_disk)} bytes from disk')
                 
                 # Remove padding from AuxPOW headers before returning
                 headers_unpadded = self._unpad_auxpow_headers(headers_from_disk, start_height)
-                
-                if start_height == 1620864:
-                    self.logger.info(f'DEBUG read_headers: returning {len(headers_unpadded)} bytes, count={disk_count}')
                 
                 return headers_unpadded, disk_count
             return b'', 0
