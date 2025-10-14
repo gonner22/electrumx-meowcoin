@@ -826,24 +826,43 @@ class DB:
         result = b''
         p = 0
         h = start_height
+        processed_count = 0
+        
+        # DEBUG: Log input data for chunk requests around problematic height
+        if start_height == 1620864:
+            self.logger.info(f'DEBUG: Processing chunk from height {start_height}')
+            self.logger.info(f'DEBUG: Input headers length: {len(headers)} bytes')
+            self.logger.info(f'DEBUG: Expected: 2016 headers * 120 bytes = {2016 * 120} bytes')
         
         while p < len(headers):
             # Each header in file is 120 bytes (after KAWPOW activation)
             if h >= self.coin.KAWPOW_ACTIVATION_HEIGHT:
                 header_in_file = headers[p:p + 120]
+                expected_size = 120
                 p += 120
             else:
                 header_in_file = headers[p:p + 80]
+                expected_size = 80
                 p += 80
             
             # Check if we have enough data
-            if len(header_in_file) < (120 if h >= self.coin.KAWPOW_ACTIVATION_HEIGHT else 80):
+            if len(header_in_file) < expected_size:
+                if start_height == 1620864:
+                    self.logger.info(f'DEBUG: Premature end at header {processed_count}, height {h}')
+                    self.logger.info(f'DEBUG: Got {len(header_in_file)} bytes, expected {expected_size}')
                 break
                 
             # Unpad if needed - this will return 80 bytes for AuxPOW, 120 for others
             header_to_send = self._unpad_auxpow_header(header_in_file, h)
             result += header_to_send
             h += 1
+            processed_count += 1
+        
+        # DEBUG: Log final results
+        if start_height == 1620864:
+            self.logger.info(f'DEBUG: Processed {processed_count} headers')
+            self.logger.info(f'DEBUG: Result length: {len(result)} bytes')
+            self.logger.info(f'DEBUG: Average header size: {len(result) / processed_count if processed_count > 0 else 0:.1f} bytes')
         
         return result
 
@@ -872,12 +891,32 @@ class DB:
         def read_headers():
             # Read some from disk
             disk_count = max(0, min(count, self.state.height + 1 - start_height))
+            
+            # DEBUG: Log for problematic chunk
+            if start_height == 1620864:
+                self.logger.info(f'DEBUG read_headers: start_height={start_height}, requested_count={count}')
+                self.logger.info(f'DEBUG read_headers: state.height={self.state.height}')
+                self.logger.info(f'DEBUG read_headers: disk_count={disk_count}')
+            
             if disk_count:
                 offset = self.header_offset(start_height)
                 size = self.header_offset(start_height + disk_count) - offset
+                
+                if start_height == 1620864:
+                    self.logger.info(f'DEBUG read_headers: offset={offset}, size={size}')
+                    self.logger.info(f'DEBUG read_headers: size/120={size//120} full headers')
+                
                 headers_from_disk = self.headers_file.read(offset, size)
+                
+                if start_height == 1620864:
+                    self.logger.info(f'DEBUG read_headers: read {len(headers_from_disk)} bytes from disk')
+                
                 # Remove padding from AuxPOW headers before returning
                 headers_unpadded = self._unpad_auxpow_headers(headers_from_disk, start_height)
+                
+                if start_height == 1620864:
+                    self.logger.info(f'DEBUG read_headers: returning {len(headers_unpadded)} bytes, count={disk_count}')
+                
                 return headers_unpadded, disk_count
             return b'', 0
 
