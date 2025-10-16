@@ -136,14 +136,27 @@ class OnDiskBlock:
             
             if version_int & (1 << 8):  # AuxPOW block
                 # Use AuxPOW deserializer to read header + skip AuxPOW data
+                # We need to read enough bytes to cover header + full AuxPOW structure
+                # AuxPOW can be large (coinbase tx + merkle branches + parent header)
+                # Read up to 50KB or block size, whichever is smaller
                 from electrumx.lib.tx import DeserializerAuxPow
-                raw_block_peek = self.block_file.read(10000)  # Read enough for header + AuxPOW
-                self.block_file.seek(0)
+                peek_size = min(50000, self.size)
+                raw_block_peek = self.block_file.read(peek_size)
+                
+                if len(raw_block_peek) < peek_size:
+                    # Block file is smaller than expected, read what we got
+                    pass
+                
                 deserializer = DeserializerAuxPow(raw_block_peek)
                 self.header = deserializer.read_header(self.coin.BASIC_HEADER_SIZE, self.height)
                 # Now cursor is positioned after AuxPOW data
-                # Seek file to match deserializer cursor
-                self.block_file.seek(deserializer.cursor)
+                # Seek file to match deserializer cursor, but validate it's within block size
+                header_end_offset = deserializer.cursor
+                
+                if header_end_offset > self.size:
+                    raise RuntimeError(f'AuxPOW header parsing error: cursor {header_end_offset} exceeds block size {self.size}')
+                
+                self.block_file.seek(header_end_offset)
                 return self
         
         # For non-AuxPOW blocks, use static header length
