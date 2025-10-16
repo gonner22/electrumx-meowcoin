@@ -125,6 +125,28 @@ class OnDiskBlock:
 
     def __enter__(self):
         self.block_file = open_file(self.filename(self.hex_hash, self.height))
+        
+        # CRITICAL FIX: For AuxPOW blocks, the on-disk raw_block contains full AuxPOW data
+        # We need to read it dynamically, not assume static_header_len
+        if self.coin.is_auxpow_active(self.height):
+            # Peek at version to check if this is an AuxPOW block
+            peek_data = self.block_file.read(4)
+            self.block_file.seek(0)
+            version_int = int.from_bytes(peek_data[:4], byteorder='little')
+            
+            if version_int & (1 << 8):  # AuxPOW block
+                # Use AuxPOW deserializer to read header + skip AuxPOW data
+                from electrumx.lib.tx import DeserializerAuxPow
+                raw_block_peek = self.block_file.read(10000)  # Read enough for header + AuxPOW
+                self.block_file.seek(0)
+                deserializer = DeserializerAuxPow(raw_block_peek)
+                self.header = deserializer.read_header(self.coin.BASIC_HEADER_SIZE, self.height)
+                # Now cursor is positioned after AuxPOW data
+                # Seek file to match deserializer cursor
+                self.block_file.seek(deserializer.cursor)
+                return self
+        
+        # For non-AuxPOW blocks, use static header length
         self.header = self._read(self.coin.static_header_len(self.height))
         return self
 
@@ -183,7 +205,11 @@ class OnDiskBlock:
     def _chunk_offsets(self):
         '''Iterate the transactions forwards to find their boundaries.'''
         base_offset = self.block_file.tell()
-        assert base_offset in (80, 120)
+        # CRITICAL FIX: For AuxPOW blocks, cursor can be at variable positions
+        # Don't assert fixed offsets - the __enter__ method positions correctly
+        # Just verify we're past the header (at least 80 bytes)
+        if base_offset < 80:
+            raise RuntimeError(f'Invalid base_offset {base_offset} - must be at least 80 (after header)')
         raw = self._read(self.chunk_size)
         deserializer = Deserializer(raw)
         tx_count = deserializer.read_varint()
