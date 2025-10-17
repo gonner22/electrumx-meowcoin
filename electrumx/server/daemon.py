@@ -46,7 +46,8 @@ class Daemon(object):
         self.set_url(url)
         # Limit concurrent RPC calls to this number.
         # See DEFAULT_HTTP_WORKQUEUE in bitcoind, which is typically 16
-        self.workqueue_semaphore = asyncio.Semaphore(value=10)
+        # Increased from 10 to 20 to handle multiple concurrent clients without blocking BlockProcessor
+        self.workqueue_semaphore = asyncio.Semaphore(value=20)
         self.block_semaphore = asyncio.Semaphore(value=6)
         self.init_retry = init_retry
         self.max_retry = max_retry

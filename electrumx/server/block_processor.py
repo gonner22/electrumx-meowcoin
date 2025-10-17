@@ -381,7 +381,7 @@ class BlockProcessor:
     up in case of chain reorganisations.
     '''
 
-    polling_delay = 5
+    polling_delay = 3  # Reduced from 5 to 3 for faster block detection
 
     def __init__(self, env: Env, db: DB, daemon: Daemon, notifications):
         self.env = env
