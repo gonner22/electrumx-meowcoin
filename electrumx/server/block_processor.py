@@ -821,24 +821,17 @@ class BlockProcessor:
         utxo_count_delta = 0
 
         with block as raw_block:
-            # Read the complete raw block data
-            raw_block.block_file.seek(0)
-            complete_raw_block = raw_block.block_file.read()
+            # Header is already correctly parsed in __enter__ for both MeowPow and AuxPOW blocks
+            # No need to re-read the entire block - just validate prevhash and iterate transactions
             
-            # Parse the block using the coin's deserializer
-            parsed_block = self.coin.block(complete_raw_block, raw_block.height)
-            
-            # Update block.header with the correctly parsed header
-            # This is crucial for AuxPOW blocks where header size may differ from static size
-            block.header = parsed_block.header
-            
-            if self.coin.header_prevhash(parsed_block.header) != self.state.tip:
+            if self.coin.header_prevhash(block.header) != self.state.tip:
                 self.reorg_count = -1
                 return
             
             self.ok = False
-            for tx in parsed_block.transactions:
-                tx_hash = tx.txid if hasattr(tx, 'txid') else double_sha256(tx.serialize())
+            # iter_txs() reads transactions from current file cursor (after header)
+            # This avoids re-reading the entire block that was already read in __enter__
+            for tx, tx_hash in block.iter_txs():
                 hashXs = []
                 inputHashXs = defaultdict(set)
                 append_hashX = hashXs.append
