@@ -226,6 +226,9 @@ class OnDiskBlock:
         if base_offset < 80:
             raise RuntimeError(f'Invalid base_offset {base_offset} - must be at least 80 (after header)')
         raw = self._read(self.chunk_size)
+        if not raw:
+            raise RuntimeError(f'No transaction data after header at offset {base_offset} '
+                               f'for block {self.hex_hash} height {self.height:,d} size {self.size}')
         deserializer = Deserializer(raw)
         tx_count = deserializer.read_varint()
         logger.info(f'backing up block {self.hex_hash} height {self.height:,d} '
@@ -250,6 +253,9 @@ class OnDiskBlock:
             if tx_count == 0:
                 return offsets
             raw = raw[cursor:] + self._read(self.chunk_size)
+            if not raw:
+                raise RuntimeError(f'Incomplete block data: {tx_count} transactions remaining '
+                                   f'for block {self.hex_hash} height {self.height:,d}')
             deserializer = Deserializer(raw)
 
     def iter_txs_reversed(self):
