@@ -118,6 +118,7 @@ class OnDiskBlock:
         self.size = size
         self.block_file = None
         self.header = None
+        self.header_end_offset = None  # Position after header where transactions start
 
     @classmethod
     def filename(cls, hex_hash, height):
@@ -194,6 +195,7 @@ class OnDiskBlock:
                             if header_end_offset > self.size:
                                 raise RuntimeError(f'AuxPOW header parsing error: cursor {header_end_offset} exceeds block size {self.size}')
                             
+                            self.header_end_offset = header_end_offset
                             self.block_file.seek(header_end_offset)
                             return self
                         else:
@@ -203,6 +205,7 @@ class OnDiskBlock:
                             logger.info(f'DIAG: Taking MeowPow direct path (80 bytes) for block {self.hex_hash}')
                             self.block_file.seek(0)
                             self.header = self._read(80)
+                            self.header_end_offset = 80
                             logger.info(f'DIAG: Header read, cursor now at {self.block_file.tell()}')
                             return self
             except Exception as e:
@@ -214,6 +217,7 @@ class OnDiskBlock:
         header_len = self.coin.static_header_len(self.height)
         logger.info(f'DIAG: Block {self.hex_hash} taking pre-AuxPOW path, reading {header_len} bytes')
         self.header = self._read(header_len)
+        self.header_end_offset = header_len
         logger.info(f'DIAG: Header read, cursor now at {self.block_file.tell()}')
         return self
 
@@ -1600,6 +1604,14 @@ class BlockProcessor:
             # This is crucial for AuxPOW blocks where header size may differ from static size
             parsed_block = self.coin.block(complete_raw_block, raw_block.height)
             block.header = parsed_block.header
+            
+            # CRITICAL FIX: Reset file cursor to position after header
+            # backup_block reads entire file which moves cursor to EOF
+            # but iter_txs_reversed needs cursor at start of transactions
+            if raw_block.header_end_offset is not None:
+                logger.info(f'DIAG: Resetting cursor from {raw_block.block_file.tell()} to {raw_block.header_end_offset}')
+                raw_block.block_file.seek(raw_block.header_end_offset)
+            
             self.ok = False
             for tx, tx_hash in block.iter_txs_reversed():
                 for idx, txout in enumerate(tx.outputs):
