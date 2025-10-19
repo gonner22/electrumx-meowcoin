@@ -169,8 +169,15 @@ class OnDiskBlock:
                     
                     self.block_file.seek(header_end_offset)
                     return self
+                else:
+                    # MeowPow direct block with AuxPOW bit set but no AuxPOW structure
+                    # According to Meowcoin code: if nVersion.IsAuxpow() then header is 80 bytes
+                    # (includes nNonce but not nHeight/nNonce64/mix_hash)
+                    self.block_file.seek(0)
+                    self.header = self._read(80)
+                    return self
         
-        # For non-AuxPOW blocks or MeowPow direct blocks, use static header length
+        # For blocks before AuxPOW activation, use static header length
         self.header = self._read(self.coin.static_header_len(self.height))
         return self
 
