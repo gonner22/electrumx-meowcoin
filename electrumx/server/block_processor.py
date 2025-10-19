@@ -168,8 +168,10 @@ class OnDiskBlock:
 
     def _read(self, size):
         result = self.block_file.read(size)
-        if not result:
-            raise RuntimeError(f'truncated block file for block {self.hex_hash} '
+        # Allow EOF (empty result) when we've already read some data
+        # Only raise error if file is completely empty from the start
+        if not result and self.block_file.tell() == 0:
+            raise RuntimeError(f'empty block file for block {self.hex_hash} '
                                f'height {self.height:,d}')
         return result
 
