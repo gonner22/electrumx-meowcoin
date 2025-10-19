@@ -693,7 +693,10 @@ class BlockProcessor:
 
             # Flush history if it takes up over 20% of cache memory.
             # Flush UTXOs once they take up 80% of cache memory.
-            if asset_MB + utxo_MB + hist_MB >= cache_MB or hist_MB >= cache_MB // 5:
+            # When caught up, also flush every 5 blocks to ensure timely client notifications
+            blocks_pending = len(self.headers)
+            if (asset_MB + utxo_MB + hist_MB >= cache_MB or hist_MB >= cache_MB // 5 or
+                (self.caught_up and blocks_pending >= 5)):
                 self.force_flush_arg = (utxo_MB + asset_MB) >= cache_MB * 4 // 5
             await sleep(30)
 
@@ -704,6 +707,26 @@ class BlockProcessor:
             await run_in_thread(self.advance_block, block)
             if self.force_flush_arg is not None:
                 await self.flush(self.force_flush_arg)
+                
+                # When caught up, notify clients immediately after flush
+                # This ensures clients receive updates within ~5 minutes instead of hours
+                if self.caught_up:
+                    await self.notifications.on_block(
+                        self.touched, self.state.height,
+                        self.asset_touched, self.qualifier_touched,
+                        self.h160_touched, self.broadcast_touched,
+                        self.frozen_touched, self.validator_touched,
+                        self.qualifier_association_touched
+                    )
+                    # Clear touched sets after notification
+                    self.touched = set()
+                    self.asset_touched = set()
+                    self.qualifier_touched = set()
+                    self.h160_touched = set()
+                    self.broadcast_touched = set()
+                    self.frozen_touched = set()
+                    self.validator_touched = set()
+                    self.qualifier_association_touched = set()
 
         for hex_hash in hex_hashes:
             # Stop if we must flush
