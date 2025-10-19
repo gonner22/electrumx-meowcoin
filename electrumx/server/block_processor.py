@@ -126,40 +126,51 @@ class OnDiskBlock:
     def __enter__(self):
         self.block_file = open_file(self.filename(self.hex_hash, self.height))
         
-        # CRITICAL FIX: For AuxPOW blocks, the on-disk raw_block contains full AuxPOW data
-        # We need to read it dynamically, not assume static_header_len
+        # CRITICAL FIX: After AuxPOW activation, blocks can be:
+        # 1. Mined directly (MeowPow): version bit set, but NO AuxPOW structure
+        # 2. Merge-mined (Scrypt): version bit set AND has AuxPOW structure
+        # The version bit only indicates AuxPOW is enabled, not that this specific block has it
         if self.coin.is_auxpow_active(self.height):
-            # Peek at version to check if this is an AuxPOW block
+            # Peek at version to check version bit
             peek_data = self.block_file.read(4)
             self.block_file.seek(0)
             version_int = int.from_bytes(peek_data[:4], byteorder='little')
             
-            if version_int & (1 << 8):  # AuxPOW block
-                # Use AuxPOW deserializer to read header + skip AuxPOW data
-                # We need to read enough bytes to cover header + full AuxPOW structure
-                # AuxPOW can be large (coinbase tx + merkle branches + parent header)
-                # Read up to 50KB or block size, whichever is smaller
-                from electrumx.lib.tx import DeserializerAuxPow
-                peek_size = min(50000, self.size)
-                raw_block_peek = self.block_file.read(peek_size)
+            if version_int & (1 << 8):  # AuxPOW version bit is set
+                # Check if block actually has AuxPOW structure by examining byte after header
+                self.block_file.seek(80)  # Position after basic header
+                first_tx_byte = self.block_file.read(1)
+                self.block_file.seek(0)  # Reset to start
                 
-                if len(raw_block_peek) < peek_size:
-                    # Block file is smaller than expected, read what we got
-                    pass
+                # Heuristic to detect AuxPOW structure:
+                # - MeowPow direct: byte 80 is tx_count varint (typically 1-50)
+                # - AuxPOW merge: byte 80 is start of coinbase tx version (0x01 or 0x02)
+                # Most blocks have < 100 txs, so varint < 100
+                # Coinbase tx version is always 0x01 or 0x02
+                has_auxpow_structure = first_tx_byte and first_tx_byte[0] <= 2
                 
-                deserializer = DeserializerAuxPow(raw_block_peek)
-                self.header = deserializer.read_header(self.coin.BASIC_HEADER_SIZE, self.height)
-                # Now cursor is positioned after AuxPOW data
-                # Seek file to match deserializer cursor, but validate it's within block size
-                header_end_offset = deserializer.cursor
-                
-                if header_end_offset > self.size:
-                    raise RuntimeError(f'AuxPOW header parsing error: cursor {header_end_offset} exceeds block size {self.size}')
-                
-                self.block_file.seek(header_end_offset)
-                return self
+                if has_auxpow_structure:
+                    # Block has AuxPOW structure - use AuxPOW deserializer
+                    from electrumx.lib.tx import DeserializerAuxPow
+                    peek_size = min(50000, self.size)
+                    raw_block_peek = self.block_file.read(peek_size)
+                    
+                    if len(raw_block_peek) < peek_size:
+                        # Block file is smaller than expected, read what we got
+                        pass
+                    
+                    deserializer = DeserializerAuxPow(raw_block_peek)
+                    self.header = deserializer.read_header(self.coin.BASIC_HEADER_SIZE, self.height)
+                    # Now cursor is positioned after AuxPOW data
+                    header_end_offset = deserializer.cursor
+                    
+                    if header_end_offset > self.size:
+                        raise RuntimeError(f'AuxPOW header parsing error: cursor {header_end_offset} exceeds block size {self.size}')
+                    
+                    self.block_file.seek(header_end_offset)
+                    return self
         
-        # For non-AuxPOW blocks, use static header length
+        # For non-AuxPOW blocks or MeowPow direct blocks, use static header length
         self.header = self._read(self.coin.static_header_len(self.height))
         return self
 
