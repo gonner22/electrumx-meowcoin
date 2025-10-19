@@ -127,16 +127,11 @@ class OnDiskBlock:
     def __enter__(self):
         self.block_file = open_file(self.filename(self.hex_hash, self.height))
         
-        # TEMP DEBUG LOG
-        is_active = self.coin.is_auxpow_active(self.height)
-        logger.info(f'DIAG: __enter__ for block {self.hex_hash} height {self.height}, '
-                    f'is_auxpow_active={is_active}, AUXPOW_ACTIVATION_HEIGHT={self.coin.AUXPOW_ACTIVATION_HEIGHT}')
-        
         # CRITICAL FIX: After AuxPOW activation, blocks can be:
         # 1. Mined directly (MeowPow): version bit set, but NO AuxPOW structure
         # 2. Merge-mined (Scrypt): version bit set AND has AuxPOW structure
         # The version bit only indicates AuxPOW is enabled, not that this specific block has it
-        if is_active:
+        if self.coin.is_auxpow_active(self.height):
             try:
                 # Peek at version to check version bit
                 peek_data = self.block_file.read(4)
@@ -145,24 +140,16 @@ class OnDiskBlock:
                 self.block_file.seek(0)
                 version_int = int.from_bytes(peek_data[:4], byteorder='little')
                 
-                logger.info(f'DIAG: Version read: 0x{version_int:08x}, checking AuxPOW bit')
-                
                 if version_int & (1 << 8):  # AuxPOW version bit is set
                     # Check if block actually has AuxPOW structure by examining byte after header
                     self.block_file.seek(80)  # Position after basic header
                     first_tx_byte = self.block_file.read(1)
                     
                     if not first_tx_byte or len(first_tx_byte) < 1:
-                        logger.warning(f'DIAG: Cannot read byte 80 from block {self.hex_hash}, '
-                                       f'file size {self.size}, falling back to static header')
+                        # Cannot read byte 80, fall through to pre-AuxPOW path
                         self.block_file.seek(0)
-                        # Fall through to pre-AuxPOW path
                     else:
                         self.block_file.seek(0)  # Reset to start
-                        
-                        # TEMP DEBUG LOG
-                        logger.info(f'DIAG: Block {self.hex_hash} height {self.height} size {self.size} '
-                                    f'version=0x{version_int:08x} byte_80=0x{first_tx_byte[0]:02x}')
                         
                         # Heuristic to detect AuxPOW structure:
                         # - MeowPow direct: byte 80 is tx_count varint (typically 1-50)
@@ -171,12 +158,8 @@ class OnDiskBlock:
                         # Coinbase tx version is always 0x01 or 0x02
                         has_auxpow_structure = first_tx_byte and first_tx_byte[0] <= 2
                         
-                        # TEMP DEBUG LOG
-                        logger.info(f'DIAG: Block {self.hex_hash} has_auxpow_structure={has_auxpow_structure}')
-                
                         if has_auxpow_structure:
                             # Block has AuxPOW structure - use AuxPOW deserializer
-                            logger.info(f'DIAG: Taking AuxPOW path for block {self.hex_hash}')
                             from electrumx.lib.tx import DeserializerAuxPow
                             peek_size = min(50000, self.size)
                             raw_block_peek = self.block_file.read(peek_size)
@@ -190,8 +173,6 @@ class OnDiskBlock:
                             # Now cursor is positioned after AuxPOW data
                             header_end_offset = deserializer.cursor
                             
-                            logger.info(f'DIAG: AuxPOW parsed, cursor at {header_end_offset}, file size {self.size}')
-                            
                             if header_end_offset > self.size:
                                 raise RuntimeError(f'AuxPOW header parsing error: cursor {header_end_offset} exceeds block size {self.size}')
                             
@@ -202,23 +183,18 @@ class OnDiskBlock:
                             # MeowPow direct block with AuxPOW bit set but no AuxPOW structure
                             # According to Meowcoin code: if nVersion.IsAuxpow() then header is 80 bytes
                             # (includes nNonce but not nHeight/nNonce64/mix_hash)
-                            logger.info(f'DIAG: Taking MeowPow direct path (80 bytes) for block {self.hex_hash}')
                             self.block_file.seek(0)
                             self.header = self._read(80)
                             self.header_end_offset = 80
-                            logger.info(f'DIAG: Header read, cursor now at {self.block_file.tell()}')
                             return self
-            except Exception as e:
-                logger.error(f'DIAG: Exception in AuxPOW detection for block {self.hex_hash}: {type(e).__name__}: {e}')
-                # Reset file position and fall through to pre-AuxPOW path
+            except Exception:
+                # Exception in AuxPOW detection, reset file position and fall through to pre-AuxPOW path
                 self.block_file.seek(0)
         
         # For blocks before AuxPOW activation, use static header length
         header_len = self.coin.static_header_len(self.height)
-        logger.info(f'DIAG: Block {self.hex_hash} taking pre-AuxPOW path, reading {header_len} bytes')
         self.header = self._read(header_len)
         self.header_end_offset = header_len
-        logger.info(f'DIAG: Header read, cursor now at {self.block_file.tell()}')
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
@@ -278,15 +254,12 @@ class OnDiskBlock:
     def _chunk_offsets(self):
         '''Iterate the transactions forwards to find their boundaries.'''
         base_offset = self.block_file.tell()
-        # TEMP DEBUG LOG
-        logger.info(f'DIAG: _chunk_offsets entered for block {self.hex_hash}, cursor at {base_offset}, file size {self.size}')
         # CRITICAL FIX: For AuxPOW blocks, cursor can be at variable positions
         # Don't assert fixed offsets - the __enter__ method positions correctly
         # Just verify we're past the header (at least 80 bytes)
         if base_offset < 80:
             raise RuntimeError(f'Invalid base_offset {base_offset} - must be at least 80 (after header)')
         raw = self._read(self.chunk_size)
-        logger.info(f'DIAG: Read {len(raw)} bytes from offset {base_offset}')
         if not raw:
             raise RuntimeError(f'No transaction data after header at offset {base_offset} '
                                f'for block {self.hex_hash} height {self.height:,d} size {self.size}')
@@ -1609,7 +1582,6 @@ class BlockProcessor:
             # backup_block reads entire file which moves cursor to EOF
             # but iter_txs_reversed needs cursor at start of transactions
             if raw_block.header_end_offset is not None:
-                logger.info(f'DIAG: Resetting cursor from {raw_block.block_file.tell()} to {raw_block.header_end_offset}')
                 raw_block.block_file.seek(raw_block.header_end_offset)
             
             self.ok = False
