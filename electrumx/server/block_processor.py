@@ -766,7 +766,42 @@ class BlockProcessor:
                            f'UTXO={utxo_MB}MB Asset={asset_MB}MB Hist={hist_MB}MB | '
                            f'blocks_pending={blocks_pending} caught_up={self.caught_up} height={self.state.height + blocks_pending}')
                 
-                self.force_flush_arg = (utxo_MB + asset_MB) >= cache_MB * 4 // 5
+                flush_utxos = (utxo_MB + asset_MB) >= cache_MB * 4 // 5
+                
+                # CRITICAL FIX: If blocks_ready, flush immediately instead of waiting for new blocks
+                # This ensures timely updates to clients when caught up
+                if blocks_ready:
+                    logger.info(f'FLUSHING IMMEDIATELY: {blocks_pending} blocks ready, caught_up={self.caught_up}')
+                    await self.run_with_lock(self.flush(flush_utxos))
+                    
+                    # Notify clients immediately after flush using on_block()
+                    # on_block() stores the data and calls _maybe_notify() which actually sends to clients
+                    if self.caught_up:
+                        await self.notifications.on_block(
+                            self.touched,  # touched parameter comes first
+                            self.state.height,  # height second
+                            self.asset_touched,
+                            self.qualifier_touched,
+                            self.h160_touched,
+                            self.broadcast_touched,
+                            self.frozen_touched,
+                            self.validator_touched,
+                            self.qualifier_association_touched
+                        )
+                        # Clear touched sets after notification
+                        self.touched = set()
+                        self.asset_touched = set()
+                        self.qualifier_touched = set()
+                        self.h160_touched = set()
+                        self.broadcast_touched = set()
+                        self.frozen_touched = set()
+                        self.validator_touched = set()
+                        self.qualifier_association_touched = set()
+                    
+                    logger.info(f'IMMEDIATE FLUSH COMPLETE: height={self.state.height}, clients notified')
+                else:
+                    # For cache/hist flushes, use the normal flow via force_flush_arg
+                    self.force_flush_arg = flush_utxos
             
             await sleep(30)
 
