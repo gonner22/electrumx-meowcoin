@@ -737,9 +737,37 @@ class BlockProcessor:
             # Flush UTXOs once they take up 80% of cache memory.
             # When caught up, also flush every 5 blocks to ensure timely client notifications
             blocks_pending = len(self.headers)
-            if (asset_MB + utxo_MB + hist_MB >= cache_MB or hist_MB >= cache_MB // 5 or
-                (self.caught_up and blocks_pending >= 5)):
+            
+            # DIAGNOSTIC: Check flush criteria
+            cache_full = asset_MB + utxo_MB + hist_MB >= cache_MB
+            hist_full = hist_MB >= cache_MB // 5
+            blocks_ready = self.caught_up and blocks_pending >= 5
+            
+            should_flush = cache_full or hist_full or blocks_ready
+            
+            # DIAGNOSTIC: Always log status every 30s
+            logger.info(f'CHECK_CACHE: should_flush={should_flush} | '
+                       f'cache_full={cache_full}({asset_MB + utxo_MB + hist_MB}>={cache_MB}) '
+                       f'hist_full={hist_full}({hist_MB}>={cache_MB // 5}) '
+                       f'blocks_ready={blocks_ready}(caught_up={self.caught_up} blocks={blocks_pending}>=5) | '
+                       f'CACHE_MB={cache_MB}')
+            
+            if should_flush:
+                # Log the reason(s) for triggering flush
+                reasons = []
+                if cache_full:
+                    reasons.append(f'cache_full({asset_MB + utxo_MB + hist_MB}MB >= {cache_MB}MB)')
+                if hist_full:
+                    reasons.append(f'hist_full({hist_MB}MB >= {cache_MB // 5}MB)')
+                if blocks_ready:
+                    reasons.append(f'blocks_ready({blocks_pending} >= 5)')
+                
+                logger.info(f'FLUSH TRIGGER: {", ".join(reasons)} | '
+                           f'UTXO={utxo_MB}MB Asset={asset_MB}MB Hist={hist_MB}MB | '
+                           f'blocks_pending={blocks_pending} caught_up={self.caught_up} height={self.state.height + blocks_pending}')
+                
                 self.force_flush_arg = (utxo_MB + asset_MB) >= cache_MB * 4 // 5
+            
             await sleep(30)
 
     async def advance_blocks(self, hex_hashes):
@@ -748,6 +776,10 @@ class BlockProcessor:
         async def advance_and_maybe_flush(block):
             await run_in_thread(self.advance_block, block)
             if self.force_flush_arg is not None:
+                # DIAGNOSTIC: Log when flush actually executes
+                blocks_processed = len(self.headers)
+                logger.info(f'FLUSH EXECUTING: height={self.state.height} blocks_in_queue={blocks_processed} '
+                           f'force_flush_arg={self.force_flush_arg} caught_up={self.caught_up}')
                 await self.flush(self.force_flush_arg)
                 
                 # When caught up, notify clients immediately after flush
