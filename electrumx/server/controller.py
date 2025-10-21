@@ -137,9 +137,16 @@ class Notifications(object):
         for old in [h for h in tqatbp if h <= height]:
             touched_qualifiers_that_are_in_validator.update(tqatbp.pop(old))
 
-        await self.notify(height, touched, touched_assets, touched_qualifiers_that_tagged, touched_h160s_that_were_tagged,
-                          touched_assets_that_made_broadcasts, touched_assets_that_were_frozen, touched_assets_that_validator_changed,
-                          touched_qualifiers_that_are_in_validator)
+        # Convert dicts to sets for session.notify() which expects sets for .intersection()
+        await self.notify(height, 
+                         set(touched), 
+                         set(touched_assets), 
+                         set(touched_qualifiers_that_tagged), 
+                         set(touched_h160s_that_were_tagged),
+                         set(touched_assets_that_made_broadcasts), 
+                         set(touched_assets_that_were_frozen), 
+                         set(touched_assets_that_validator_changed),
+                         set(touched_qualifiers_that_are_in_validator))
 
     async def notify(self, height, touched, assets, q, h, b, f, v, qv):
         pass
@@ -165,15 +172,17 @@ class Notifications(object):
     async def on_block(self, touched, height, reissued,
                        qualifier_touched, h160_touched, broadcast_touched,
                         frozen_touched, validator_touched, qualifier_association_touched):
-        self._touched_bp[height] = touched
-        self._reissued_assets_bp[height] = reissued
-        self._qualifier_touched_bp[height] = qualifier_touched
-        self._h160_touched_bp[height] = h160_touched
-        self._broadcast_touched_bp[height] = broadcast_touched
-        self._frozen_touched_bp[height] = frozen_touched
-        self._validator_touched_bp[height] = frozen_touched
-        self._validator_touched_bp[height] = validator_touched
-        self._qualifier_association_touched_bp[height] = qualifier_association_touched
+        # CRITICAL FIX: Convert sets to dicts for compatibility with _maybe_notify()
+        # BlockProcessor passes sets, but _maybe_notify() expects dicts
+        # Dict format: {hashX: None} for touched addresses, {asset: None} for assets
+        self._touched_bp[height] = {item: None for item in touched} if isinstance(touched, set) else touched
+        self._reissued_assets_bp[height] = {item: None for item in reissued} if isinstance(reissued, set) else reissued
+        self._qualifier_touched_bp[height] = {item: None for item in qualifier_touched} if isinstance(qualifier_touched, set) else qualifier_touched
+        self._h160_touched_bp[height] = {item: None for item in h160_touched} if isinstance(h160_touched, set) else h160_touched
+        self._broadcast_touched_bp[height] = {item: None for item in broadcast_touched} if isinstance(broadcast_touched, set) else broadcast_touched
+        self._frozen_touched_bp[height] = {item: None for item in frozen_touched} if isinstance(frozen_touched, set) else frozen_touched
+        self._validator_touched_bp[height] = {item: None for item in validator_touched} if isinstance(validator_touched, set) else validator_touched
+        self._qualifier_association_touched_bp[height] = {item: None for item in qualifier_association_touched} if isinstance(qualifier_association_touched, set) else qualifier_association_touched
         self._highest_block = height
         await self._maybe_notify()
 
