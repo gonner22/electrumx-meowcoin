@@ -77,10 +77,17 @@ class Notifications(object):
             # Either we are processing a block and waiting for it to
             # come in, or we have not yet had a mempool update for the
             # new block height
-            logger.warning(f'_maybe_notify: SKIPPING notification - waiting for mempool sync | '
-                          f'mempool_heights={sorted(tmp.keys()) if tmp else "EMPTY"} | '
-                          f'block_heights={sorted(tbp.keys()) if tbp else "EMPTY"}')
-            return
+            
+            # CRITICAL FIX: If mempool hasn't synced but we have block updates,
+            # notify with block data only (don't wait forever for mempool)
+            if tbp:
+                height = max(tbp.keys())
+                logger.info(f'_maybe_notify: Mempool not synced, notifying with BLOCK DATA ONLY for height={height}')
+            else:
+                logger.warning(f'_maybe_notify: SKIPPING notification - waiting for mempool sync | '
+                              f'mempool_heights={sorted(tmp.keys()) if tmp else "EMPTY"} | '
+                              f'block_heights={sorted(tbp.keys()) if tbp else "EMPTY"}')
+                return
         
         touched = tmp.pop(height, {})
         for old in [h for h in tmp if h <= height]:
