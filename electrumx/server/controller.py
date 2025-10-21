@@ -206,10 +206,16 @@ class Controller(ServerBase):
         async with Daemon(env.coin, env.daemon_url) as daemon:
             db = DB(env)
             bp = block_proc.BlockProcessor(env, db, daemon, notifications)
+            
+            # CRITICAL: Give DB access to BlockProcessor cache for atomic mempool lookups
+            db.bp = bp
 
             # Set notifications up to implement the MemPoolAPI
             def get_db_height():
-                return db.state.height
+                # CRITICAL FIX: Return actual processing height, not just flushed height
+                # BlockProcessor.state.height includes blocks processed but not yet flushed
+                # This allows mempool to sync even when blocks are waiting to be flushed
+                return bp.state.height
             notifications.height = daemon.height
             notifications.db_height = get_db_height
             notifications.cached_height = daemon.cached_height

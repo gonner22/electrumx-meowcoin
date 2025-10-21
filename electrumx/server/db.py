@@ -333,6 +333,9 @@ class DB:
         
         self.asset_db: Storage = None
         self.suid_db: Storage = None
+        
+        # Reference to BlockProcessor for cache lookup (set by Controller)
+        self.bp = None
 
         self.logger.info(f'using {self.env.db_engine} for DB backend')
 
@@ -1278,18 +1281,40 @@ class DB:
         Used by the mempool code.
         '''
 
-        def lookup_hashXs():
-            '''Return (hashX, suffix) pairs, or None if not found,
-            for each prevout.
+        def lookup_prevouts():
+            '''Return (hashX, asset, value) tuples, or None if not found, for each prevout.
+            Checks BlockProcessor cache first for atomic mempool processing.
             '''
-            def lookup_hashX(tx_hash, tx_idx):
+            results = []
+            for tx_hash, tx_idx in prevouts:
                 idx_packed = pack_le_uint32(tx_idx)
-
+                
+                # CRITICAL FIX: Check BlockProcessor cache FIRST for unflushed UTXOs
+                # This ensures atomic lookups when mempool processes TXs that spend
+                # outputs from recently processed but not-yet-flushed blocks
+                if self.bp and self.bp.utxo_cache:
+                    cache_key = tx_hash + idx_packed
+                    if cache_key in self.bp.utxo_cache:
+                        cache_value = self.bp.utxo_cache[cache_key]
+                        # Cache format: hashX (11 bytes) + asset_id (4 bytes) + value (8 bytes) + ...
+                        hashX = cache_value[:HASHX_LEN]
+                        asset_id = cache_value[HASHX_LEN:HASHX_LEN+4]
+                        value_bytes = cache_value[HASHX_LEN+4:HASHX_LEN+4+8]
+                        value, = unpack_le_uint64(value_bytes)
+                        asset_str = self.get_asset_for_id(asset_id)
+                        # DIAGNOSTIC LOG
+                        if len(results) == 0:  # Only log first cache hit to avoid spam
+                            self.logger.info(f'MEMPOOL CACHE HIT: Found UTXO in BlockProcessor cache (unflushed)')
+                        results.append((hashX, asset_str, value))
+                        continue  # Found in cache, skip DB lookup
+                
+                # Not in cache, look up in DB
                 # Key: b'h' + compressed_tx_hash + tx_idx + tx_num
-                # Value: hashX
+                # Value: hashX + asset_id
                 prefix = PREFIX_UTXO_HISTORY + tx_hash[:4] + idx_packed
-
-                # Find which entry, if any, the TX_HASH matches.
+                found = False
+                
+                # Find which entry, if any, the TX_HASH matches
                 for db_key, db_val in self.utxo_db.iterator(prefix=prefix):
                     hashX = db_val[:HASHX_LEN]
                     asset_id = db_val[HASHX_LEN:]
@@ -1297,32 +1322,23 @@ class DB:
                     tx_num, = unpack_le_uint64(tx_num_packed + bytes(3))
                     fs_hash, _height = self.fs_tx_hash(tx_num)
                     if fs_hash == tx_hash:
-                        return hashX, asset_id, idx_packed + tx_num_packed
-                return None, None, None
-            return [lookup_hashX(*prevout) for prevout in prevouts]
-
-        def lookup_utxos(hashX_pairs):
-            def lookup_utxo(hashX, asset_id, suffix):
-                if not hashX:
-                    # This can happen when the daemon is a block ahead
-                    # of us and has mempool txs spending outputs from
-                    # that new block
-                    return None
-                # Key: b'u' + address_hashX + tx_idx + tx_num
-                # Value: the UTXO value as a 64-bit unsigned integer
-                key = PREFIX_HASHX_LOOKUP + hashX + asset_id + suffix
-                db_value = self.utxo_db.get(key)
-                if not db_value:
-                    # This can happen if the DB was updated between
-                    # getting the hashXs and getting the UTXOs
-                    return None
-                value, = unpack_le_uint64(db_value)
-                asset_str = self.get_asset_for_id(asset_id)
-                return hashX, asset_str, value
-            return [lookup_utxo(*hashX_pair) for hashX_pair in hashX_pairs]
-
-        hashX_pairs = await run_in_thread(lookup_hashXs)
-        return [i for i in await run_in_thread(lookup_utxos, hashX_pairs) if i]
+                        # Found the UTXO, now get its value
+                        # Key: b'u' + address_hashX + asset_id + tx_idx + tx_num
+                        key = PREFIX_HASHX_LOOKUP + hashX + asset_id + idx_packed + tx_num_packed
+                        db_value = self.utxo_db.get(key)
+                        if db_value:
+                            value, = unpack_le_uint64(db_value)
+                            asset_str = self.get_asset_for_id(asset_id)
+                            results.append((hashX, asset_str, value))
+                            found = True
+                        break
+                
+                if not found:
+                    results.append(None)
+            
+            return results
+        
+        return [i for i in await run_in_thread(lookup_prevouts) if i]
 
     # For external use
     
