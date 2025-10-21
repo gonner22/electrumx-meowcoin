@@ -774,12 +774,14 @@ class BlockProcessor:
                     logger.info(f'FLUSHING IMMEDIATELY: {blocks_pending} blocks ready, caught_up={self.caught_up}')
                     await self.run_with_lock(self.flush(flush_utxos))
                     
-                    # Notify clients immediately after flush using on_block()
-                    # on_block() stores the data and calls _maybe_notify() which actually sends to clients
-                    if self.caught_up:
-                        await self.notifications.on_block(
-                            self.touched,  # touched parameter comes first
-                            self.state.height,  # height second
+                    # CRITICAL: Call notify() DIRECTLY bypassing _maybe_notify() 
+                    # because mempool may not sync (seen in logs: mempool_heights=EMPTY)
+                    # The notify callback is set in Notifications.start() to SessionManager._notify_sessions
+                    if self.caught_up and self.notifications.notify:
+                        logger.info(f'Calling notifications.notify DIRECTLY for height {self.state.height}')
+                        await self.notifications.notify(
+                            self.state.height,  # height first for notify()
+                            self.touched,
                             self.asset_touched,
                             self.qualifier_touched,
                             self.h160_touched,
@@ -797,8 +799,9 @@ class BlockProcessor:
                         self.frozen_touched = set()
                         self.validator_touched = set()
                         self.qualifier_association_touched = set()
-                    
-                    logger.info(f'IMMEDIATE FLUSH COMPLETE: height={self.state.height}, clients notified')
+                        logger.info(f'IMMEDIATE FLUSH COMPLETE: height={self.state.height}, clients notified via direct notify()')
+                    else:
+                        logger.warning(f'Cannot notify: caught_up={self.caught_up}, notify_func_set={self.notifications.notify is not None}')
                 else:
                     # For cache/hist flushes, use the normal flow via force_flush_arg
                     self.force_flush_arg = flush_utxos
