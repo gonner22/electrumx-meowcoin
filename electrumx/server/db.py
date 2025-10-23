@@ -1302,9 +1302,6 @@ class DB:
                         value_bytes = cache_value[HASHX_LEN+4:HASHX_LEN+4+8]
                         value, = unpack_le_uint64(value_bytes)
                         asset_str = self.get_asset_for_id(asset_id)
-                        # DIAGNOSTIC LOG
-                        if len(results) == 0:  # Only log first cache hit to avoid spam
-                            self.logger.info(f'MEMPOOL CACHE HIT: Found UTXO in BlockProcessor cache (unflushed)')
                         results.append((hashX, asset_str, value))
                         continue  # Found in cache, skip DB lookup
                 
