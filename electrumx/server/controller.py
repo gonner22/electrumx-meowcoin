@@ -59,34 +59,21 @@ class Notifications(object):
         tqtbp, thtbp, tbtbp, tftbp, tvtbp, tqatbp = self._qualifier_touched_bp, self._h160_touched_bp, self._broadcast_touched_bp, self._frozen_touched_bp, self._validator_touched_bp, self._qualifier_association_touched_bp
         tqtmp, thtmp, tbtmp, tftmp, tvtmp, tqatmp = self._qualifier_touched_mp, self._h160_touched_mp, self._broadcast_touched_mp, self._frozen_touched_mp, self._validator_touched_mp, self._qualifier_association_touched_mp
 
-        # DIAGNOSTIC: Log state before checking
-        import logging
-        logger = logging.getLogger('Notifications')
-        logger.info(f'_maybe_notify: mempool_heights={sorted(tmp.keys()) if tmp else []}, '
-                   f'block_heights={sorted(tbp.keys()) if tbp else []}, '
-                   f'highest_block={self._highest_block}')
-
         common = set(tmp).intersection(tbp)
         if common:
             height = max(common)
-            logger.info(f'_maybe_notify: WILL NOTIFY via common intersection, height={height}')
         elif tmp and max(tmp) == self._highest_block:
             height = self._highest_block
-            logger.info(f'_maybe_notify: WILL NOTIFY via highest_block match, height={height}')
         else:
             # Either we are processing a block and waiting for it to
             # come in, or we have not yet had a mempool update for the
             # new block height
             
-            # CRITICAL FIX: If mempool hasn't synced but we have block updates,
+            # If mempool hasn't synced but we have block updates,
             # notify with block data only (don't wait forever for mempool)
             if tbp:
                 height = max(tbp.keys())
-                logger.info(f'_maybe_notify: Mempool not synced, notifying with BLOCK DATA ONLY for height={height}')
             else:
-                logger.warning(f'_maybe_notify: SKIPPING notification - waiting for mempool sync | '
-                              f'mempool_heights={sorted(tmp.keys()) if tmp else "EMPTY"} | '
-                              f'block_heights={sorted(tbp.keys()) if tbp else "EMPTY"}')
                 return
         
         touched = tmp.pop(height, {})
