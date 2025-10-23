@@ -785,26 +785,30 @@ class BlockProcessor:
         async def advance_and_maybe_flush(block):
             await run_in_thread(self.advance_block, block)
             if self.force_flush_arg is not None:
-                await self.flush(self.force_flush_arg)
-                
-                # When caught up, notify clients immediately after flush
-                if self.caught_up:
-                    await self.notifications.on_block(
-                        self.touched, self.state.height,
-                        self.asset_touched, self.qualifier_touched,
-                        self.h160_touched, self.broadcast_touched,
-                        self.frozen_touched, self.validator_touched,
-                        self.qualifier_association_touched
-                    )
-                    # Clear touched sets after notification
-                    self.touched = set()
-                    self.asset_touched = set()
-                    self.qualifier_touched = set()
-                    self.h160_touched = set()
-                    self.broadcast_touched = set()
-                    self.frozen_touched = set()
-                    self.validator_touched = set()
-                    self.qualifier_association_touched = set()
+                # Only flush if there are pending blocks (avoid empty flush)
+                if self.headers:
+                    await self.flush(self.force_flush_arg)
+                    
+                    # When caught up, notify clients immediately after flush
+                    if self.caught_up:
+                        await self.notifications.on_block(
+                            self.touched, self.state.height,
+                            self.asset_touched, self.qualifier_touched,
+                            self.h160_touched, self.broadcast_touched,
+                            self.frozen_touched, self.validator_touched,
+                            self.qualifier_association_touched
+                        )
+                        # Clear touched sets after notification
+                        self.touched = set()
+                        self.asset_touched = set()
+                        self.qualifier_touched = set()
+                        self.h160_touched = set()
+                        self.broadcast_touched = set()
+                        self.frozen_touched = set()
+                        self.validator_touched = set()
+                        self.qualifier_association_touched = set()
+                # Reset force_flush_arg even if we didn't flush
+                self.force_flush_arg = None
 
         for hex_hash in hex_hashes:
             # Stop if we must flush
