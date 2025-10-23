@@ -543,9 +543,12 @@ class DB:
         flush_data.state.flush_time = end_time
         flush_data.state.sync_time += flush_interval
 
-        # Update and flush state again so as not to drop the batch commit time
+        # CRITICAL: Always update db.state after flush so clients see correct height
+        # Sessions use db.state.height in _refresh_hsub_results (line 384 of session.py)
+        self.state = flush_data.state.copy()
+        
+        # Write UTXO state to disk only when doing full UTXO flush
         if flush_utxos:
-            self.state = flush_data.state.copy()
             self.write_utxo_state(self.utxo_db)
 
         size_delta = self.log_flush_stats('flush', flush_data, elapsed)
