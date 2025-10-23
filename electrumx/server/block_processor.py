@@ -660,6 +660,9 @@ class BlockProcessor:
         )
     async def flush(self, flush_utxos):
         self.force_flush_arg = None
+        # Skip flush if no new blocks (prevents double flush)
+        if not self.headers:
+            return
         # Estimate size remaining
         daemon_height = self.daemon.cached_height()
         tail_blocks = max(0, (daemon_height - max(self.state.height, self.coin.CHAIN_SIZE_HEIGHT)))
@@ -727,8 +730,8 @@ class BlockProcessor:
             OnDiskBlock.log_block = True
             if hist_cache_size:
                 # Include height information - use current processing height
-                # During sync, db.state.height is not updated until flush, so add processed blocks
-                our_height = self.db.state.height + len(self.headers)
+                # Use self.state.height which is updated immediately after block processing
+                our_height = self.state.height
                 daemon_height = self.daemon.cached_height()
                 logger.info(f'our height: {our_height:,d} daemon: {daemon_height:,d} '
                           f'UTXOs {utxo_MB:,d}MB Assets {asset_MB:,d}MB hist {hist_MB:,d}MB')
@@ -749,30 +752,32 @@ class BlockProcessor:
                 
                 # If blocks_ready, flush immediately for timely client updates
                 if blocks_ready:
-                    await self.run_with_lock(self.flush(flush_utxos))
-                    
-                    # Notify clients directly after flush
-                    if self.caught_up and self.notifications.notify:
-                        await self.notifications.notify(
-                            self.state.height,
-                            self.touched,
-                            self.asset_touched,
-                            self.qualifier_touched,
-                            self.h160_touched,
-                            self.broadcast_touched,
-                            self.frozen_touched,
-                            self.validator_touched,
-                            self.qualifier_association_touched
-                        )
-                        # Clear touched sets after notification
-                        self.touched = set()
-                        self.asset_touched = set()
-                        self.qualifier_touched = set()
-                        self.h160_touched = set()
-                        self.broadcast_touched = set()
-                        self.frozen_touched = set()
-                        self.validator_touched = set()
-                        self.qualifier_association_touched = set()
+                    # Double-check headers exist (avoid race condition with empty flush)
+                    if self.headers:
+                        await self.run_with_lock(self.flush(flush_utxos))
+                        
+                        # Notify clients directly after flush
+                        if self.caught_up and self.notifications.notify:
+                            await self.notifications.notify(
+                                self.state.height,
+                                self.touched,
+                                self.asset_touched,
+                                self.qualifier_touched,
+                                self.h160_touched,
+                                self.broadcast_touched,
+                                self.frozen_touched,
+                                self.validator_touched,
+                                self.qualifier_association_touched
+                            )
+                            # Clear touched sets after notification
+                            self.touched = set()
+                            self.asset_touched = set()
+                            self.qualifier_touched = set()
+                            self.h160_touched = set()
+                            self.broadcast_touched = set()
+                            self.frozen_touched = set()
+                            self.validator_touched = set()
+                            self.qualifier_association_touched = set()
                 else:
                     # For cache/hist flushes, use the normal flow via force_flush_arg
                     self.force_flush_arg = flush_utxos
@@ -818,6 +823,32 @@ class BlockProcessor:
             if not block:
                 break
             await self.run_with_lock(advance_and_maybe_flush(block))
+            
+            # When caught up, flush immediately after each block for timely client updates
+            if self.caught_up and self.headers:
+                await self.run_with_lock(self.flush(False))
+                # Notify clients directly after flush
+                if self.notifications.notify:
+                    await self.notifications.notify(
+                        self.state.height,
+                        self.touched,
+                        self.asset_touched,
+                        self.qualifier_touched,
+                        self.h160_touched,
+                        self.broadcast_touched,
+                        self.frozen_touched,
+                        self.validator_touched,
+                        self.qualifier_association_touched
+                    )
+                    # Clear touched sets after notification
+                    self.touched = set()
+                    self.asset_touched = set()
+                    self.qualifier_touched = set()
+                    self.h160_touched = set()
+                    self.broadcast_touched = set()
+                    self.frozen_touched = set()
+                    self.validator_touched = set()
+                    self.qualifier_association_touched = set()
             
         # If we've not caught up we have no clients for the touched set
         if not self.caught_up:
