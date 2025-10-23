@@ -8,7 +8,7 @@ EnvironmentFile=/etc/electrumx.conf
 ExecStart=/home/electrumx/electrumx/electrumx_server
 User=electrumx
 LimitNOFILE=8192
-TimeoutStopSec=30min
+TimeoutStopSec=1min
 
 [Install]
 WantedBy=multi-user.target

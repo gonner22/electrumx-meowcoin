@@ -1,12 +1,12 @@
 ===============================================
-Meowcoin ElectrumX v2.0 - A fork of ElectrumX
+Meowcoin ElectrumX v2.1 - A fork of ElectrumX
 ===============================================
 
 ElectrumX server implementation for Meowcoin with enhanced AuxPOW support and improved compatibility.
 
   :Licence: MIT
   :Language: Python (>= 3.8)
-  :Version: 2.0
+  :Version: 2.1
   :Original Author: Neil Booth
   :Meowcoin Conversion: CatBreeder / Topper
   :Maintainer: Meowcoin Foundation
@@ -31,7 +31,7 @@ Features
 * **Updated activation parameters** - Correct activation heights and times for Meowcoin algorithms
 * **Improved ElectrumX compatibility** - Better integration with ElectrumX protocol standards
 
-Version 2.0 Changes
+Version 2.1 Changes
 ===================
 
 * Enhanced AuxPOW header handling with truncated header support

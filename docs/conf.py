@@ -21,7 +21,7 @@ from electrumx import version
 
 # -- Project information -----------------------------------------------------
 
-project = 'ElectrumX Ravencoin'
+project = 'ElectrumX Meowcoin'
 copyright = '2016-2020, Neil Booth; 2020, kralverde'
 author = 'Neil Booth; kralverde'
 
@@ -147,7 +147,7 @@ latex_elements = {
 # (source start file, target name, title,
 #  author, documentclass [howto, manual, or own class]).
 latex_documents = [
-    (master_doc, 'ElectrumX.tex', 'ElectrumX Ravencoin Documentation',
+    (master_doc, 'ElectrumX.tex', 'ElectrumX Meowcoin Documentation',
      'Neil Booth, kralverde', 'manual'),
 ]
 
@@ -157,7 +157,7 @@ latex_documents = [
 # One entry per manual page. List of tuples
 # (source start file, name, description, authors, manual section).
 man_pages = [
-    (master_doc, 'electrumx', 'ElectrumX Ravencoin Documentation',
+    (master_doc, 'electrumx', 'ElectrumX Meowcoin Documentation',
      [author], 1)
 ]
 
@@ -168,7 +168,7 @@ man_pages = [
 # (source start file, target name, title, author,
 #  dir menu entry, description, category)
 texinfo_documents = [
-    (master_doc, 'ElectrumX', 'ElectrumX Ravencoin Documentation',
+    (master_doc, 'ElectrumX', 'ElectrumX Meowcoin Documentation',
      author, 'ElectrumX', 'One line description of project.',
      'Miscellaneous'),
 ]
