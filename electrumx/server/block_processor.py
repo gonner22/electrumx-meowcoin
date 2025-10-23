@@ -1826,23 +1826,11 @@ class BlockProcessor:
     async def on_caught_up(self):
         was_first_sync = self.state.first_sync
         self.state.first_sync = False
-        # Only flush if there are pending blocks (avoid double flush)
-        if self.headers:
+        # Only flush if NOT caught_up yet (first sync) or has pending blocks
+        # When caught_up, check_cache_size_loop handles all flushing
+        if not self.caught_up and self.headers:
             await self.flush(True)
-        if self.caught_up:
-            # Flush everything before notifying as client queries are performed on the DB
-            await self.notifications.on_block(self.touched, self.state.height, self.asset_touched,
-                                              self.qualifier_touched, self.h160_touched, self.broadcast_touched,
-                                              self.frozen_touched, self.validator_touched, self.qualifier_association_touched)
-            self.touched = set()
-            self.asset_touched = set()
-            self.qualifier_touched = set()
-            self.h160_touched = set()
-            self.broadcast_touched = set()
-            self.frozen_touched = set()
-            self.validator_touched = set()
-            self.qualifier_association_touched = set()
-        else:
+        if not self.caught_up:
             self.caught_up = True
             if was_first_sync:
                 logger.info(f'{electrumx.version} synced to height {self.state.height:,d}')
