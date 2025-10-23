@@ -1817,7 +1817,9 @@ class BlockProcessor:
     async def on_caught_up(self):
         was_first_sync = self.state.first_sync
         self.state.first_sync = False
-        await self.flush(True)
+        # Only flush if there are pending blocks (avoid double flush)
+        if self.headers:
+            await self.flush(True)
         if self.caught_up:
             # Flush everything before notifying as client queries are performed on the DB
             await self.notifications.on_block(self.touched, self.state.height, self.asset_touched,
