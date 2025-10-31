@@ -127,7 +127,7 @@ class OnDiskBlock:
     def __enter__(self):
         self.block_file = open_file(self.filename(self.hex_hash, self.height))
         
-        # CRITICAL FIX: After AuxPOW activation, blocks can be:
+        # FIXED: After AuxPOW activation, blocks can be:
         # 1. Mined directly (MeowPow): version bit set, but NO AuxPOW structure
         # 2. Merge-mined (Scrypt): version bit set AND has AuxPOW structure
         # The version bit only indicates AuxPOW is enabled, not that this specific block has it
@@ -140,37 +140,22 @@ class OnDiskBlock:
                 self.block_file.seek(0)
                 version_int = int.from_bytes(peek_data[:4], byteorder='little')
                 
-                if version_int & (1 << 8):  # AuxPOW version bit is set
-                    # Check if block actually has AuxPOW structure by examining byte after header
-                    self.block_file.seek(80)  # Position after basic header
-                    first_tx_byte = self.block_file.read(1)
+                if self.coin.is_auxpow_block(version_int):  # AuxPOW version bit is set
+                    # Try to parse as AuxPOW block first
+                    # If it fails, it's a MeowPow direct block without AuxPOW structure
+                    from electrumx.lib.tx import DeserializerAuxPow
+                    peek_size = min(50000, self.size)
+                    raw_block_peek = self.block_file.read(peek_size)
                     
-                    if not first_tx_byte or len(first_tx_byte) < 1:
-                        # Cannot read byte 80, fall through to pre-AuxPOW path
+                    if len(raw_block_peek) < 80:
+                        # Block too small, treat as normal block
                         self.block_file.seek(0)
                     else:
-                        self.block_file.seek(0)  # Reset to start
-                        
-                        # Heuristic to detect AuxPOW structure:
-                        # - MeowPow direct: byte 80 is tx_count varint (typically 1-50)
-                        # - AuxPOW merge: byte 80 is start of coinbase tx version (0x01 or 0x02)
-                        # Most blocks have < 100 txs, so varint < 100
-                        # Coinbase tx version is always 0x01 or 0x02
-                        has_auxpow_structure = first_tx_byte and first_tx_byte[0] <= 2
-                        
-                        if has_auxpow_structure:
-                            # Block has AuxPOW structure - use AuxPOW deserializer
-                            from electrumx.lib.tx import DeserializerAuxPow
-                            peek_size = min(50000, self.size)
-                            raw_block_peek = self.block_file.read(peek_size)
-                            
-                            if len(raw_block_peek) < peek_size:
-                                # Block file is smaller than expected, read what we got
-                                pass
-                            
+                        try:
                             deserializer = DeserializerAuxPow(raw_block_peek)
+                            # Try to read header - this will fail if no AuxPOW structure exists
                             self.header = deserializer.read_header(self.coin.BASIC_HEADER_SIZE, self.height)
-                            # Now cursor is positioned after AuxPOW data
+                            # If we got here, AuxPOW structure exists
                             header_end_offset = deserializer.cursor
                             
                             if header_end_offset > self.size:
@@ -179,10 +164,11 @@ class OnDiskBlock:
                             self.header_end_offset = header_end_offset
                             self.block_file.seek(header_end_offset)
                             return self
-                        else:
-                            # MeowPow direct block with AuxPOW bit set but no AuxPOW structure
-                            # According to Meowcoin code: if nVersion.IsAuxpow() then header is 80 bytes
-                            # (includes nNonce but not nHeight/nNonce64/mix_hash)
+                        except (ValueError, IndexError, RuntimeError):
+                            # Failed to parse AuxPOW structure - this is a MeowPow direct block
+                            # According to Meowcoin code: if nVersion.IsAuxpow() but no AuxPOW structure,
+                            # header is 80 bytes (includes nNonce but not nHeight/nNonce64/mix_hash)
+                            logger.debug(f'Block {self.hex_hash} height {self.height}: AuxPOW bit set but no structure, treating as MeowPow direct (80-byte header)')
                             self.block_file.seek(0)
                             self.header = self._read(80)
                             self.header_end_offset = 80
@@ -568,6 +554,71 @@ class BlockProcessor:
         else:
             logger.info(f'faking a reorg of {count:,d} blocks')
         await self.flush(True)
+        
+        # CRITICAL FIX: Ensure all caches are cleared before backup_block()
+        # backup_block() calls assert_flushed() which expects empty caches
+        # If flush() had early return due to empty headers, caches may still have data
+        # Clear them explicitly to prevent AssertionError
+        cache_counts_before = {
+            'headers': len(self.headers),
+            'utxo_cache': len(self.utxo_cache),
+            'tx_hashes': len(self.tx_hashes)
+        }
+        self.headers.clear()
+        self.tx_hashes.clear()
+        self.utxo_cache.clear()
+        self.utxo_deletes.clear()
+        self.utxo_undos.clear()
+        self.new_asset_ids.clear()
+        self.new_asset_ids_undos.clear()
+        self.asset_ids_deletes.clear()
+        self.new_h160_ids.clear()
+        self.new_h160_ids_undos.clear()
+        self.h160_ids_deletes.clear()
+        self.asset_metadata.clear()
+        self.asset_metadata_undos.clear()
+        self.asset_metadata_deletes.clear()
+        self.asset_metadata_history.clear()
+        self.asset_metadata_history_undos.clear()
+        self.asset_metadata_history_deletes.clear()
+        self.asset_broadcasts.clear()
+        self.asset_broadcasts_deletes.clear()
+        self.tags.clear()
+        self.tags_undos.clear()
+        self.tags_deletes.clear()
+        self.tag_history.clear()
+        self.tag_history_undos.clear()
+        self.tag_history_deletes.clear()
+        self.freezes.clear()
+        self.freezes_undos.clear()
+        self.freezes_deletes.clear()
+        self.freeze_history.clear()
+        self.freeze_history_undos.clear()
+        self.freeze_history_deletes.clear()
+        self.verifiers.clear()
+        self.verifiers_undos.clear()
+        self.verifiers_deletes.clear()
+        self.verifier_history.clear()
+        self.verifier_history_undos.clear()
+        self.verifier_history_deletes.clear()
+        self.associations.clear()
+        self.associations_undos.clear()
+        self.associations_deletes.clear()
+        self.association_history.clear()
+        self.association_history_undos.clear()
+        self.association_history_deletes.clear()
+        self.touched.clear()
+        self.asset_touched.clear()
+        self.qualifier_touched.clear()
+        self.h160_touched.clear()
+        self.broadcast_touched.clear()
+        self.frozen_touched.clear()
+        self.validator_touched.clear()
+        self.qualifier_association_touched.clear()
+        
+        # DEBUG: Log cache clearing if there was data (helps diagnose reorg issues)
+        if any(cache_counts_before.values()):
+            logger.debug(f'Reorg cache cleanup: cleared {cache_counts_before} before backup')
 
         start, hex_hashes = await self._reorg_hashes(count)
         pairs = reversed(list(enumerate(hex_hashes, start=start)))
@@ -750,37 +801,10 @@ class BlockProcessor:
             if should_flush:
                 flush_utxos = (utxo_MB + asset_MB) >= cache_MB * 4 // 5
                 
-                # If blocks_ready, flush immediately for timely client updates
-                if blocks_ready:
-                    # Double-check headers exist (avoid race condition with empty flush)
-                    if self.headers:
-                        await self.run_with_lock(self.flush(flush_utxos))
-                        
-                        # Notify clients directly after flush
-                        if self.caught_up and self.notifications.notify:
-                            await self.notifications.notify(
-                                self.state.height,
-                                self.touched,
-                                self.asset_touched,
-                                self.qualifier_touched,
-                                self.h160_touched,
-                                self.broadcast_touched,
-                                self.frozen_touched,
-                                self.validator_touched,
-                                self.qualifier_association_touched
-                            )
-                            # Clear touched sets after notification
-                            self.touched = set()
-                            self.asset_touched = set()
-                            self.qualifier_touched = set()
-                            self.h160_touched = set()
-                            self.broadcast_touched = set()
-                            self.frozen_touched = set()
-                            self.validator_touched = set()
-                            self.qualifier_association_touched = set()
-                else:
-                    # For cache/hist flushes, use the normal flow via force_flush_arg
-                    self.force_flush_arg = flush_utxos
+                # FIXED: Always use force_flush_arg for consistency
+                # Notifications will be handled by advance_and_maybe_flush() via on_block()
+                # This prevents duplicate notifications and ensures proper coordination via _maybe_notify()
+                self.force_flush_arg = flush_utxos
             
             await sleep(5)
 
@@ -1435,11 +1459,18 @@ class BlockProcessor:
             self.associations_undos.append((internal_association_undo_info, block.height))
             self.association_history_undos.append((internal_association_history_undo_info, block.height))
         
-        # CRITICAL: Pad AuxPOW headers to 120 bytes for storage to maintain static offsets
+        # FIXED: Header storage padding logic
+        # After KAWPOW_ACTIVATION_HEIGHT (373), all headers in file are stored as 120 bytes
+        # - MeowPow blocks: naturally 120 bytes (includes nHeight/nNonce64/mix_hash)
+        # - AuxPOW blocks: 80 bytes basic header, padded to 120 for consistent offsets
+        # This ensures consistent file offsets regardless of block type
         header_to_store = block.header
-        if (self.coin.is_auxpow_active(block.height) and len(block.header) == 80):
-            # AuxPOW header (80 bytes) - pad to 120 for consistent disk storage
-            header_to_store = block.header + bytes(40)
+        if block.height >= self.coin.KAWPOW_ACTIVATION_HEIGHT:
+            if self.coin.is_auxpow_active(block.height) and len(block.header) == 80:
+                # AuxPOW header (80 bytes) - pad to 120 for consistent disk storage
+                header_to_store = block.header + bytes(40)
+            # MeowPow headers are already 120 bytes, no padding needed
+        # Pre-KAWPOW headers are stored as-is (80 bytes)
         self.headers.append(header_to_store)
         
         #Update State
@@ -1614,20 +1645,16 @@ class BlockProcessor:
         count = 0
         utxo_count_delta = 0
         with block as raw_block:
-            # Read the complete raw block data to parse header correctly
-            raw_block.block_file.seek(0)
-            complete_raw_block = raw_block.block_file.read()
-            
-            # Parse the block to get the correctly formatted header
-            # This is crucial for AuxPOW blocks where header size may differ from static size
-            parsed_block = self.coin.block(complete_raw_block, raw_block.height)
-            block.header = parsed_block.header
-            
-            # CRITICAL FIX: Reset file cursor to position after header
-            # backup_block reads entire file which moves cursor to EOF
-            # but iter_txs_reversed needs cursor at start of transactions
+            # FIXED: Use header already parsed by OnDiskBlock.__enter__()
+            # The header is already correctly parsed for both MeowPow and AuxPOW blocks
+            # No need to re-parse - just ensure cursor is at correct position for iter_txs_reversed()
+            # Reset file cursor to position after header (set by __enter__)
             if raw_block.header_end_offset is not None:
                 raw_block.block_file.seek(raw_block.header_end_offset)
+            else:
+                # Fallback: if header_end_offset not set, use static header length
+                header_len = self.coin.static_header_len(raw_block.height)
+                raw_block.block_file.seek(header_len)
             
             self.ok = False
             for tx, tx_hash in block.iter_txs_reversed():

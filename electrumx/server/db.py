@@ -824,21 +824,22 @@ class DB:
         return header
     
     def _unpad_auxpow_headers(self, headers, start_height):
-        '''Remove padding from multiple concatenated AuxPOW headers.
+        '''Remove padding from multiple concatenated headers before sending to clients.
         
-        CRITICAL FIX: Process headers sequentially, maintaining correct alignment
-        when mixing AuxPOW (80 bytes) and MeowPow (120 bytes) headers.
+        Header storage format:
+        - Before KAWPOW_ACTIVATION_HEIGHT (373): 80 bytes per header
+        - After KAWPOW_ACTIVATION_HEIGHT: 120 bytes per header (for consistent offsets)
+          * MeowPow blocks: naturally 120 bytes
+          * AuxPOW blocks: 80 bytes basic header + 40 bytes padding
+        
+        This function reads headers from disk (all 120 bytes after KAWPOW activation)
+        and removes padding from AuxPOW headers (returns 80 bytes) before sending to clients.
+        MeowPow headers are returned as-is (120 bytes).
         '''
         result = b''
         p = 0
         h = start_height
         processed_count = 0
-        
-        # DEBUG: Log input data for chunk requests around problematic height
-        if start_height == 1620864:
-            self.logger.info(f'DEBUG: Processing chunk from height {start_height}')
-            self.logger.info(f'DEBUG: Input headers length: {len(headers)} bytes')
-            self.logger.info(f'DEBUG: Expected: 2016 headers * 120 bytes = {2016 * 120} bytes')
         
         while p < len(headers):
             # Each header in file is 120 bytes (after KAWPOW activation)
@@ -853,22 +854,13 @@ class DB:
             
             # Check if we have enough data
             if len(header_in_file) < expected_size:
-                if start_height == 1620864:
-                    self.logger.info(f'DEBUG: Premature end at header {processed_count}, height {h}')
-                    self.logger.info(f'DEBUG: Got {len(header_in_file)} bytes, expected {expected_size}')
                 break
                 
-            # Unpad if needed - this will return 80 bytes for AuxPOW, 120 for others
+            # Unpad if needed - returns 80 bytes for AuxPOW, 120 bytes for MeowPow
             header_to_send = self._unpad_auxpow_header(header_in_file, h)
             result += header_to_send
             h += 1
             processed_count += 1
-        
-        # DEBUG: Log final results
-        if start_height == 1620864:
-            self.logger.info(f'DEBUG: Processed {processed_count} headers')
-            self.logger.info(f'DEBUG: Result length: {len(result)} bytes')
-            self.logger.info(f'DEBUG: Average header size: {len(result) / processed_count if processed_count > 0 else 0:.1f} bytes')
         
         return result
 
@@ -1292,17 +1284,21 @@ class DB:
             for tx_hash, tx_idx in prevouts:
                 idx_packed = pack_le_uint32(tx_idx)
                 
-                # CRITICAL FIX: Check BlockProcessor cache FIRST for unflushed UTXOs
+                # FIXED: Check BlockProcessor cache FIRST for unflushed UTXOs
                 # This ensures atomic lookups when mempool processes TXs that spend
                 # outputs from recently processed but not-yet-flushed blocks
+                # Thread-safe: use dict.get() which is atomic, and copy the value immediately
                 if self.bp and self.bp.utxo_cache:
                     cache_key = tx_hash + idx_packed
-                    if cache_key in self.bp.utxo_cache:
-                        cache_value = self.bp.utxo_cache[cache_key]
+                    # Use get() which is atomic - avoids KeyError if key removed during access
+                    cache_value = self.bp.utxo_cache.get(cache_key)
+                    if cache_value is not None:
                         # Cache format: hashX (11 bytes) + asset_id (4 bytes) + value (8 bytes) + ...
-                        hashX = cache_value[:HASHX_LEN]
-                        asset_id = cache_value[HASHX_LEN:HASHX_LEN+4]
-                        value_bytes = cache_value[HASHX_LEN+4:HASHX_LEN+4+8]
+                        # Make defensive copy of bytes to avoid issues if cache is modified
+                        cache_value_bytes = bytes(cache_value)
+                        hashX = cache_value_bytes[:HASHX_LEN]
+                        asset_id = cache_value_bytes[HASHX_LEN:HASHX_LEN+4]
+                        value_bytes = cache_value_bytes[HASHX_LEN+4:HASHX_LEN+4+8]
                         value, = unpack_le_uint64(value_bytes)
                         asset_str = self.get_asset_for_id(asset_id)
                         results.append((hashX, asset_str, value))
