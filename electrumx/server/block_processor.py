@@ -810,44 +810,66 @@ class BlockProcessor:
 
     async def advance_blocks(self, hex_hashes):
         '''Process the blocks passed.  Detects and handles reorgs.'''
-
-        async def advance_and_maybe_flush(block):
+        
+        async def advance_block_only(block):
+            '''Process a single block without flushing.'''
             await run_in_thread(self.advance_block, block)
-            if self.force_flush_arg is not None:
-                # Only flush if there are pending blocks (avoid empty flush)
-                if self.headers:
-                    await self.flush(self.force_flush_arg)
-                    
-                    # When caught up, notify clients immediately after flush
-                    if self.caught_up:
-                        await self.notifications.on_block(
-                            self.touched, self.state.height,
-                            self.asset_touched, self.qualifier_touched,
-                            self.h160_touched, self.broadcast_touched,
-                            self.frozen_touched, self.validator_touched,
-                            self.qualifier_association_touched
-                        )
-                        # Clear touched sets after notification
-                        self.touched = set()
-                        self.asset_touched = set()
-                        self.qualifier_touched = set()
-                        self.h160_touched = set()
-                        self.broadcast_touched = set()
-                        self.frozen_touched = set()
-                        self.validator_touched = set()
-                        self.qualifier_association_touched = set()
-                # Reset force_flush_arg even if we didn't flush
-                self.force_flush_arg = None
+        
+        async def do_flush_and_notify(flush_utxos):
+            '''Flush and notify clients if caught up.'''
+            if self.headers:
+                await self.flush(flush_utxos)
+                
+                # When caught up, notify clients immediately after flush
+                if self.caught_up:
+                    await self.notifications.on_block(
+                        self.touched, self.state.height,
+                        self.asset_touched, self.qualifier_touched,
+                        self.h160_touched, self.broadcast_touched,
+                        self.frozen_touched, self.validator_touched,
+                        self.qualifier_association_touched
+                    )
+                    # Clear touched sets after notification
+                    self.touched = set()
+                    self.asset_touched = set()
+                    self.qualifier_touched = set()
+                    self.h160_touched = set()
+                    self.broadcast_touched = set()
+                    self.frozen_touched = set()
+                    self.validator_touched = set()
+                    self.qualifier_association_touched = set()
 
+        # FIXED: Process multiple blocks before flushing when caught up
+        # This reduces overhead and improves throughput when multiple blocks arrive
+        blocks_processed = 0
         for hex_hash in hex_hashes:
-            # Stop if we must flush
+            # Stop if we must flush (reorg detected)
             if self.reorg_count is not None:
                 break
+            
             block = await OnDiskBlock.streamed_block(self.coin, hex_hash)
             if not block:
                 break
-            await self.run_with_lock(advance_and_maybe_flush(block))
             
+            # Process block without flushing immediately
+            await self.run_with_lock(advance_block_only(block))
+            blocks_processed += 1
+            
+            # Flush logic:
+            # 1. Always flush if force_flush_arg is set (cache full or hist full)
+            # 2. When caught up, flush every 3 blocks to reduce lag accumulation
+            # 3. Don't flush UTXOs every time (only when necessary)
+            if self.force_flush_arg is not None:
+                # Cache/history full - flush immediately with UTXO flush if needed
+                await do_flush_and_notify(self.force_flush_arg)
+                self.force_flush_arg = None
+                blocks_processed = 0
+            elif self.caught_up and blocks_processed >= 3 and self.headers:
+                # Periodic flush when caught up to prevent lag
+                # Flush history but not UTXOs (faster, reduces blocking)
+                await do_flush_and_notify(False)
+                blocks_processed = 0
+        
         # If we've not caught up we have no clients for the touched set
         if not self.caught_up:
             self.touched = set()
