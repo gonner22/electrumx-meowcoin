@@ -16,6 +16,7 @@ import logging
 import os
 import pylru
 import traceback
+import time
 from collections import defaultdict
 from datetime import datetime
 from asyncio import sleep
@@ -428,6 +429,7 @@ class BlockProcessor:
         # A count >= 0 is a user-forced reorg; < 0 is a natural reorg
         self.reorg_count = None
         self.force_flush_arg = None
+        self.processing_blocks = False  # Track if advance_blocks() is processing
 
          # State.  Initially taken from DB;
         self.state = None
@@ -808,6 +810,12 @@ class BlockProcessor:
             if lag_detected:
                 logger.debug(f'Lag detected: {blocks_behind} blocks behind daemon, forcing flush')
             
+            # CRITICAL: Don't interfere with batch processing
+            # If advance_blocks() is processing, defer flush request until batch completes
+            if self.processing_blocks:
+                await sleep(5)
+                continue
+            
             if should_flush:
                 flush_utxos = (utxo_MB + asset_MB) >= cache_MB * 4 // 5
                 
@@ -825,7 +833,7 @@ class BlockProcessor:
             '''Process a single block without flushing.'''
             await run_in_thread(self.advance_block, block)
         
-        async def do_flush_and_notify(flush_utxos):
+        async def do_flush_and_notify(flush_utxos, reason=""):
             '''Flush and notify clients if caught up.'''
             if self.headers:
                 await self.flush(flush_utxos)
@@ -848,50 +856,101 @@ class BlockProcessor:
                     self.frozen_touched = set()
                     self.validator_touched = set()
                     self.qualifier_association_touched = set()
+                if reason:
+                    logger.debug(f'Flush triggered: {reason}')
 
-        # FIXED: Process all blocks first, then flush once at the end
-        # Maximum efficiency: if 5 blocks arrive, process all 5 then flush once
-        # No intermediate flushes, no waiting - process everything then flush immediately
-        blocks_processed = 0
-        for hex_hash in hex_hashes:
-            # Stop if we must flush (reorg detected)
-            if self.reorg_count is not None:
-                break
-            
-            block = await OnDiskBlock.streamed_block(self.coin, hex_hash)
-            if not block:
-                break
-            
-            # Process block without flushing immediately
-            await self.run_with_lock(advance_block_only(block))
-            blocks_processed += 1
-            
-            # Only flush immediately if cache/history is full (force_flush_arg set)
-            # Otherwise, wait until all blocks are processed
-            if self.force_flush_arg is not None:
-                # Cache/history full - flush immediately with UTXO flush if needed
-                await do_flush_and_notify(self.force_flush_arg)
-                self.force_flush_arg = None
-                blocks_processed = 0
+        # Set processing flag to prevent check_cache_size_loop() interference
+        self.processing_blocks = True
         
-        # After processing all blocks in batch, flush immediately if caught up
-        # This ensures blocks are available to clients without delay
-        # Whether it's 1 block or 5 blocks, flush them all together efficiently
-        if blocks_processed > 0 and self.caught_up and self.headers:
-            # Flush all processed blocks immediately - no waiting
-            # Don't flush UTXOs every time (only when cache is full) for better performance
-            await do_flush_and_notify(False)
+        try:
+            batch_start_time = time.time()
+            batch_size = len(hex_hashes)
+            
+            if batch_size > 0:
+                logger.debug(f'Processing batch of {batch_size} blocks')
+            
+            # Process ALL blocks first - maximum speed, no waits
+            blocks_processed = 0
+            previous_block_hash = None
+            
+            for hex_hash in hex_hashes:
+                # Stop if we must flush (reorg detected)
+                if self.reorg_count is not None:
+                    break
+                
+                block = await OnDiskBlock.streamed_block(self.coin, hex_hash)
+                if not block:
+                    break
+                
+                # Validate block ordering - read header directly to check prevhash
+                # This is done before advance_block() which uses 'with block:' context
+                try:
+                    with block:
+                        block_header = block.header
+                        if block_header is None:
+                            # Header not parsed yet, skip validation
+                            pass
+                        else:
+                            if previous_block_hash is not None:
+                                expected_prev_hash = self.coin.header_prevhash(block_header)
+                                if previous_block_hash != expected_prev_hash:
+                                    logger.warning(f'Block ordering issue: block {block.height} expected prevhash {hash_to_hex_str(expected_prev_hash)}, '
+                                                 f'but previous block hash was {hash_to_hex_str(previous_block_hash)}')
+                            elif blocks_processed == 0:
+                                # First block in batch - validate it connects to current tip
+                                expected_prev_hash = self.coin.header_prevhash(block_header)
+                                if self.state.tip != expected_prev_hash:
+                                    logger.warning(f'Block ordering issue: first block {block.height} expected prevhash {hash_to_hex_str(expected_prev_hash)}, '
+                                                 f'but current tip is {hash_to_hex_str(self.state.tip)}')
+                            
+                            # Store hash for next iteration validation
+                            previous_block_hash = self.coin.header_hash(block_header)
+                except Exception as e:
+                    # If validation fails, log but continue processing
+                    logger.debug(f'Could not validate block ordering for {hex_hash}: {e}')
+                
+                # Process block without flushing immediately
+                # advance_block() will use 'with block:' context internally
+                await self.run_with_lock(advance_block_only(block))
+                blocks_processed += 1
+            
+            # Calculate processing time
+            processing_time = time.time() - batch_start_time
+            
+            # CRITICAL: After processing ALL blocks, flush IMMEDIATELY (no delay)
+            # Check force_flush_arg only once after all blocks processed
+            if blocks_processed > 0:
+                flush_reason = ""
+                flush_utxos = False
+                
+                if self.force_flush_arg is not None:
+                    # Cache/history full - flush with UTXO flush if needed
+                    flush_utxos = self.force_flush_arg
+                    flush_reason = "cache/history full"
+                    self.force_flush_arg = None
+                elif self.caught_up and self.headers:
+                    # Normal flush when caught up - immediate notification to clients
+                    flush_reason = "batch complete"
+                
+                if self.caught_up and self.headers:
+                    # Flush immediately - clients receive updates without delay
+                    logger.debug(f'Processed {blocks_processed} blocks in {processing_time:.2f}s, flushing immediately')
+                    await do_flush_and_notify(flush_utxos, flush_reason)
+            
+            # If we've not caught up we have no clients for the touched set
+            if not self.caught_up:
+                self.touched = set()
+                self.asset_touched = set()
+                self.qualifier_touched = set()
+                self.h160_touched = set()
+                self.broadcast_touched = set()
+                self.frozen_touched = set()
+                self.validator_touched = set()
+                self.qualifier_association_touched = set()
         
-        # If we've not caught up we have no clients for the touched set
-        if not self.caught_up:
-            self.touched = set()
-            self.asset_touched = set()
-            self.qualifier_touched = set()
-            self.h160_touched = set()
-            self.broadcast_touched = set()
-            self.frozen_touched = set()
-            self.validator_touched = set()
-            self.qualifier_association_touched = set()
+        finally:
+            # Always clear processing flag, even if exception occurs
+            self.processing_blocks = False
         
 
     def advance_block(self, block: OnDiskBlock):
