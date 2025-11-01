@@ -796,7 +796,17 @@ class BlockProcessor:
             hist_full = hist_MB >= cache_MB // 5
             blocks_ready = self.caught_up and blocks_pending >= 1
             
-            should_flush = cache_full or hist_full or blocks_ready
+            # B.2: Detect lag and force processing
+            daemon_height = self.daemon.cached_height()
+            blocks_behind = daemon_height - self.state.height
+            
+            # Force flush if server is lagging behind daemon
+            lag_detected = blocks_behind > 1 and self.caught_up
+            
+            should_flush = cache_full or hist_full or blocks_ready or lag_detected
+            
+            if lag_detected:
+                logger.debug(f'Lag detected: {blocks_behind} blocks behind daemon, forcing flush')
             
             if should_flush:
                 flush_utxos = (utxo_MB + asset_MB) >= cache_MB * 4 // 5
@@ -839,8 +849,9 @@ class BlockProcessor:
                     self.validator_touched = set()
                     self.qualifier_association_touched = set()
 
-        # FIXED: Process multiple blocks before flushing when caught up
-        # This reduces overhead and improves throughput when multiple blocks arrive
+        # FIXED: Process all blocks first, then flush once at the end
+        # Maximum efficiency: if 5 blocks arrive, process all 5 then flush once
+        # No intermediate flushes, no waiting - process everything then flush immediately
         blocks_processed = 0
         for hex_hash in hex_hashes:
             # Stop if we must flush (reorg detected)
@@ -855,20 +866,21 @@ class BlockProcessor:
             await self.run_with_lock(advance_block_only(block))
             blocks_processed += 1
             
-            # Flush logic:
-            # 1. Always flush if force_flush_arg is set (cache full or hist full)
-            # 2. When caught up, flush every 3 blocks to reduce lag accumulation
-            # 3. Don't flush UTXOs every time (only when necessary)
+            # Only flush immediately if cache/history is full (force_flush_arg set)
+            # Otherwise, wait until all blocks are processed
             if self.force_flush_arg is not None:
                 # Cache/history full - flush immediately with UTXO flush if needed
                 await do_flush_and_notify(self.force_flush_arg)
                 self.force_flush_arg = None
                 blocks_processed = 0
-            elif self.caught_up and blocks_processed >= 3 and self.headers:
-                # Periodic flush when caught up to prevent lag
-                # Flush history but not UTXOs (faster, reduces blocking)
-                await do_flush_and_notify(False)
-                blocks_processed = 0
+        
+        # After processing all blocks in batch, flush immediately if caught up
+        # This ensures blocks are available to clients without delay
+        # Whether it's 1 block or 5 blocks, flush them all together efficiently
+        if blocks_processed > 0 and self.caught_up and self.headers:
+            # Flush all processed blocks immediately - no waiting
+            # Don't flush UTXOs every time (only when cache is full) for better performance
+            await do_flush_and_notify(False)
         
         # If we've not caught up we have no clients for the touched set
         if not self.caught_up:
