@@ -876,6 +876,16 @@ class BlockProcessor:
             for hex_hash in hex_hashes:
                 # Stop if we must flush (reorg detected)
                 if self.reorg_count is not None:
+                    # CRITICAL: If reorg detected during batch processing, flush any pending blocks first
+                    # This ensures undo information is saved before attempting backup
+                    if blocks_processed > 0 and self.headers:
+                        logger.debug(f'Reorg detected during batch processing, flushing {blocks_processed} processed blocks before backup')
+                        flush_reason = "reorg detected - flushing before backup"
+                        flush_utxos = False
+                        if self.force_flush_arg is not None:
+                            flush_utxos = self.force_flush_arg
+                            self.force_flush_arg = None
+                        await do_flush_and_notify(flush_utxos, flush_reason)
                     break
                 
                 block = await OnDiskBlock.streamed_block(self.coin, hex_hash)
@@ -919,7 +929,8 @@ class BlockProcessor:
             
             # CRITICAL: After processing ALL blocks, flush IMMEDIATELY (no delay)
             # Check force_flush_arg only once after all blocks processed
-            if blocks_processed > 0:
+            # Skip flush if reorg was detected (already flushed above)
+            if blocks_processed > 0 and self.reorg_count is None:
                 flush_reason = ""
                 flush_utxos = False
                 
@@ -1720,9 +1731,30 @@ class BlockProcessor:
         is_unspendable = (is_unspendable_genesis if block.height >= genesis_activation
                           else is_unspendable_legacy)
         
-        undo_info = self.db.read_utxo_undo_info(block.height)
-        if undo_info is None:
-            raise ChainError(f'no undo information found for height {block.height:,d}')
+        # CRITICAL: Retry reading undo info with delay if not available immediately
+        # This handles race condition where flush completed but commit hasn't finished
+        undo_info = None
+        max_retries = 5
+        retry_delay = 0.1  # 100ms
+        
+        for attempt in range(max_retries):
+            undo_info = self.db.read_utxo_undo_info(block.height)
+            if undo_info is not None:
+                break
+            if attempt < max_retries - 1:
+                # Wait before retrying (flush commit may still be in progress)
+                time.sleep(retry_delay)
+                logger.debug(f'Undo info not available for height {block.height:,d}, retrying ({attempt + 1}/{max_retries})')
+            else:
+                # Check if block is below min_undo_height (undo info not saved)
+                daemon_height = self.daemon.cached_height()
+                min_undo = self.db.min_undo_height(daemon_height)
+                if block.height < min_undo:
+                    raise ChainError(f'no undo information found for height {block.height:,d} '
+                                   f'(below min_undo_height {min_undo:,d})')
+                else:
+                    raise ChainError(f'no undo information found for height {block.height:,d} '
+                                   f'after {max_retries} retries (flush may have failed)')
 
         n = len(undo_info)
 
