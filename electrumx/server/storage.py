@@ -81,9 +81,17 @@ class LevelDB(Storage):
 
     def open(self, name, create):
         mof = 512 if self.for_sync else 128
-        # Use snappy compression (the default)
-        self.db = self.module.DB(name, create_if_missing=create,
-                                 max_open_files=mof)
+        # Optimized settings for production server (2025)
+        # Larger buffers reduce internal LevelDB flushes and fsync calls
+        self.db = self.module.DB(
+            name,
+            create_if_missing=create,
+            max_open_files=mof,
+            write_buffer_size=128 * 1024 * 1024,  # 128 MB (was 4 MB default)
+            lru_cache_size=256 * 1024 * 1024,     # 256 MB (was 8 MB default)
+            block_size=16 * 1024,                  # 16 KB (was 4 KB default)
+            bloom_filter_bits=10                   # Enable bloom filters
+        )
         self.close = self.db.close
         self.get = self.db.get
         self.put = self.db.put
