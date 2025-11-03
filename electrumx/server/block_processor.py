@@ -881,7 +881,9 @@ class BlockProcessor:
                     if blocks_processed > 0 and self.headers:
                         logger.debug(f'Reorg detected during batch processing, flushing {blocks_processed} processed blocks before backup')
                         flush_reason = "reorg detected - flushing before backup"
-                        flush_utxos = False
+                        # CRITICAL FIX: Always flush with flush_utxos=True before reorg
+                        # Without undo info, backup_block() will fail
+                        flush_utxos = True
                         if self.force_flush_arg is not None:
                             flush_utxos = self.force_flush_arg
                             self.force_flush_arg = None
@@ -940,7 +942,11 @@ class BlockProcessor:
                     flush_reason = "cache/history full"
                     self.force_flush_arg = None
                 elif self.caught_up and self.headers:
-                    # Normal flush when caught up - immediate notification to clients
+                    # CRITICAL FIX: Always flush with flush_utxos=True when caught up
+                    # This ensures undo information is saved for every block
+                    # Without undo info, reorgs will fail with "no undo information found"
+                    # Undo info is small (~50KB/block) and critical for reorg handling
+                    flush_utxos = True
                     flush_reason = "batch complete"
                 
                 if self.caught_up and self.headers:
