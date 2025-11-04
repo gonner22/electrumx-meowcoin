@@ -336,6 +336,9 @@ class DB:
         
         # Reference to BlockProcessor for cache lookup (set by Controller)
         self.bp = None
+        
+        # Thread pools for dedicated execution (set by Controller)
+        self.thread_pools = None
 
         self.logger.info(f'using {self.env.db_engine} for DB backend')
 
@@ -346,6 +349,16 @@ class DB:
         self.headers_file = util.LogicalFile('meta/headers', 2, 16000000)
         self.tx_counts_file = util.LogicalFile('meta/txcounts', 2, 2000000)
         self.hashes_file = util.LogicalFile('meta/hashes', 4, 16000000)
+
+    async def run_in_thread_client(self, func, *args):
+        '''Run a function in the client thread pool.
+        
+        Uses dedicated client pool if available, otherwise falls back to default pool.
+        '''
+        if self.thread_pools:
+            return await self.thread_pools.run_in_client_thread(func, *args)
+        else:
+            return await run_in_thread(func, *args)
 
     async def _read_tx_counts(self):
         if self.tx_counts is not None:
@@ -908,7 +921,7 @@ class DB:
                 return headers_unpadded, disk_count
             return b'', 0
 
-        return await run_in_thread(read_headers)
+        return await self.run_in_thread_client(read_headers)
 
     def fs_tx_hash(self, tx_num):
         '''Return a pair (tx_hash, tx_height) for the given tx number.
@@ -938,7 +951,7 @@ class DB:
         return [tx_hashes[idx * 32: (idx+1) * 32] for idx in range(num_txs_in_block)]
 
     async def tx_hashes_at_blockheight(self, block_height):
-        return await run_in_thread(self.fs_tx_hashes_at_blockheight, block_height)
+        return await self.run_in_thread_client(self.fs_tx_hashes_at_blockheight, block_height)
 
     async def fs_block_hashes(self, height, count):
         headers_concat, headers_count = await self.read_headers(height, count)
@@ -976,7 +989,7 @@ class DB:
         def get_tx_nums():
             return list(self.history.get_txnums(hashX, limit))
         
-        tx_nums = await run_in_thread(get_tx_nums)
+        tx_nums = await self.run_in_thread_client(get_tx_nums)
         if not tx_nums:
             return []
         
@@ -1007,8 +1020,8 @@ class DB:
                 fs_tx_hash = self.fs_tx_hash
                 return [fs_tx_hash(tx_num) for tx_num in chunk]
             
-            # Read this chunk in thread pool
-            chunk_results = await run_in_thread(read_chunk_hashes)
+            # Read this chunk in CLIENT thread pool (separate from BlockProcessor)
+            chunk_results = await self.run_in_thread_client(read_chunk_hashes)
             history.extend(chunk_results)
             
             # Yield control to allow other async operations
@@ -1304,7 +1317,7 @@ class DB:
             return utxos
 
         while True:
-            utxos = await run_in_thread(read_utxos)
+            utxos = await self.run_in_thread_client(read_utxos)
             if all(utxo.tx_hash is not None for utxo in utxos):
                 return utxos
             self.logger.warning('all_utxos: tx hash not found (reorg?), retrying...')
@@ -1374,7 +1387,7 @@ class DB:
             
             return results
         
-        return [i for i in await run_in_thread(lookup_prevouts) if i]
+        return [i for i in await self.run_in_thread_client(lookup_prevouts) if i]
 
     # For external use
     
@@ -1406,7 +1419,7 @@ class DB:
             ret_val['tx_hash'] = hash_to_hex_str(tx_hash)
             ret_val['tx_pos'] = tx_pos
             return ret_val
-        return await run_in_thread(lookup_h160)
+        return await self.run_in_thread_client(lookup_h160)
 
     async def qualifications_for_h160_history(self, h160: bytes):
         def lookup_quals_history():
@@ -1434,7 +1447,7 @@ class DB:
                     'height': height,
                 })
             return sorted(history_items, key=lambda x: (x['height'], x['tx_hash']))
-        return await run_in_thread(lookup_quals_history)
+        return await self.run_in_thread_client(lookup_quals_history)
 
     async def qualifications_for_h160(self, h160: bytes):
         def lookup_quals():
@@ -1464,7 +1477,7 @@ class DB:
                     'height': height,
                 }
             return ret_val
-        return await run_in_thread(lookup_quals)
+        return await self.run_in_thread_client(lookup_quals)
 
     async def qualifications_for_qualifier_history(self, asset: bytes):
         def lookup_quals_history():
@@ -1492,7 +1505,7 @@ class DB:
                     'height': height,
                 })
             return sorted(history_items, key=lambda x: (x['height'], x['tx_hash']))
-        return await run_in_thread(lookup_quals_history)
+        return await self.run_in_thread_client(lookup_quals_history)
 
     async def qualifications_for_qualifier(self, asset: bytes):
         def lookup_quals():
@@ -1522,7 +1535,7 @@ class DB:
                     'height': height,
                 }
             return ret_val
-        return await run_in_thread(lookup_quals)
+        return await self.run_in_thread_client(lookup_quals)
 
     async def restricted_frozen_history(self, asset: bytes):
         def lookup_restricted_history():
@@ -1545,7 +1558,7 @@ class DB:
                     'height': height,
                 })
             return sorted(history_items, key=lambda x: (x['height'], x['tx_hash']))
-        return await run_in_thread(lookup_restricted_history)
+        return await self.run_in_thread_client(lookup_restricted_history)
 
     async def is_restricted_frozen(self, asset: bytes):
         def lookup_restricted():
@@ -1572,7 +1585,7 @@ class DB:
             ret_val['tx_hash'] = hash_to_hex_str(tx_hash)
             ret_val['tx_pos'] = tx_pos
             return ret_val
-        return await run_in_thread(lookup_restricted)
+        return await self.run_in_thread_client(lookup_restricted)
 
     async def get_restricted_string_history(self, asset: bytes):
         def lookup_restricted_history():
@@ -1597,7 +1610,7 @@ class DB:
                     'height': source_height
                 })
             return sorted(history_items, key=lambda x: (x['height'], x['tx_hash']))
-        return await run_in_thread(lookup_restricted_history)
+        return await self.run_in_thread_client(lookup_restricted_history)
 
 
     async def get_restricted_string(self, asset: bytes):
@@ -1625,7 +1638,7 @@ class DB:
             ret_val['restricted_tx_pos'] = restricted_tx_pos
             ret_val['qualifying_tx_pos'] = qualifying_tx_pos
             return ret_val
-        return await run_in_thread(lookup_restricted)
+        return await self.run_in_thread_client(lookup_restricted)
 
     async def lookup_qualifier_associations_history(self, asset: bytes):
         def lookup_associations_history():
@@ -1656,7 +1669,7 @@ class DB:
                     'height': height,
                 })
             return sorted(history_items, key=lambda x: (x['height'], x['tx_hash']))
-        return await run_in_thread(lookup_associations_history)
+        return await self.run_in_thread_client(lookup_associations_history)
 
     async def lookup_qualifier_associations(self, asset: bytes):
         def lookup_associations():
@@ -1688,7 +1701,7 @@ class DB:
                     'height': height,
                 }
             return ret_val
-        return await run_in_thread(lookup_associations)
+        return await self.run_in_thread_client(lookup_associations)
 
     async def lookup_messages(self, asset_name: bytes):
         def read_messages():
@@ -1713,12 +1726,12 @@ class DB:
                     'tx_pos': tx_pos,
                 })
             return ret_val
-        return await run_in_thread(read_messages)
+        return await self.run_in_thread_client(read_messages)
 
     async def get_assets_with_prefix(self, prefix: bytes):
         def find_assets():
             return [asset.decode('ascii') for asset, _ in self.suid_db.iterator(prefix=PREFIX_ASSET_TO_ID+prefix)]
-        return await run_in_thread(find_assets)
+        return await self.run_in_thread_client(find_assets)
 
     async def lookup_asset_meta_history(self, asset_name: bytes):
         def read_asset_meta_history():
@@ -1750,7 +1763,7 @@ class DB:
                 })
             return sorted(history_items, key=lambda x: (x['height'], x['tx_hash']))
         
-        return await run_in_thread(read_asset_meta_history)
+        return await self.run_in_thread_client(read_asset_meta_history)
 
 
     async def lookup_asset_meta(self, asset_name: bytes):
@@ -1811,4 +1824,4 @@ class DB:
                 }
 
             return to_ret
-        return await run_in_thread(read_assets_meta)
+        return await self.run_in_thread_client(read_assets_meta)

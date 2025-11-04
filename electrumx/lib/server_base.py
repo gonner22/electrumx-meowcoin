@@ -19,6 +19,7 @@ from functools import partial
 
 from aiorpcx import spawn
 
+from electrumx.lib.thread_pool import ThreadPools
 from electrumx.lib.util import class_logger
 
 
@@ -50,6 +51,7 @@ class ServerBase:
         self.logger.info(f'Python version: {version_str}')
         self.env = env
         self.start_time = 0
+        self.thread_pools = None
 
         # Sanity checks
         if sys.version_info < self.PYTHON_MIN_VERSION:
@@ -103,6 +105,12 @@ class ServerBase:
         loop = asyncio.get_event_loop()
         shutdown_event = asyncio.Event()
 
+        # Create separate thread pools for BlockProcessor and client operations
+        # This prevents client requests from starving BlockProcessor flush operations
+        self.thread_pools = ThreadPools(bp_workers=20, client_workers=50)
+        self.thread_pools.setup(loop)
+        self.logger.info('ThreadPools configured: 20 for BlockProcessor, 50 for clients')
+
         if platform.system() != 'Windows':
             # No signals on Windows
             for signame in ('SIGINT', 'SIGTERM'):
@@ -124,4 +132,6 @@ class ServerBase:
             with suppress(asyncio.CancelledError):
                 await server_task
         finally:
+            if self.thread_pools:
+                self.thread_pools.shutdown()
             self.logger.info('shutdown complete')

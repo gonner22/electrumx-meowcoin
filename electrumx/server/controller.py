@@ -205,6 +205,11 @@ class Controller(ServerBase):
             
             # CRITICAL: Give DB access to BlockProcessor cache for atomic mempool lookups
             db.bp = bp
+            
+            # Pass thread pools to DB and BlockProcessor for dedicated thread usage
+            if self.thread_pools:
+                db.thread_pools = self.thread_pools
+                bp.thread_pools = self.thread_pools
 
             # Set notifications up to implement the MemPoolAPI
             def get_db_height():

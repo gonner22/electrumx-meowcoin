@@ -430,6 +430,7 @@ class BlockProcessor:
         self.reorg_count = None
         self.force_flush_arg = None
         self.processing_blocks = False  # Track if advance_blocks() is processing
+        self.thread_pools = None  # Set by Controller after initialization
 
          # State.  Initially taken from DB;
         self.state = None
@@ -633,7 +634,10 @@ class BlockProcessor:
             block = await OnDiskBlock.streamed_block(self.coin, hex_hash)
             if not block:
                 break
-            await self.run_with_lock(run_in_thread(self.backup_block, block))       
+            if self.thread_pools:
+                await self.run_with_lock(self.thread_pools.run_in_bp_thread(self.backup_block, block))
+            else:
+                await self.run_with_lock(run_in_thread(self.backup_block, block))       
         
         logger.info(f'backed up to height {self.state.height:,d}')
         self.backed_up_event.set()
@@ -721,7 +725,10 @@ class BlockProcessor:
         tail_blocks = max(0, (daemon_height - max(self.state.height, self.coin.CHAIN_SIZE_HEIGHT)))
         size_remaining = (max(self.coin.CHAIN_SIZE - self.state.chain_size, 0) +
                           tail_blocks * self.coin.AVG_BLOCK_SIZE)
-        await run_in_thread(self.db.flush_dbs, self.flush_data(), flush_utxos, size_remaining)
+        if self.thread_pools:
+            await self.thread_pools.run_in_bp_thread(self.db.flush_dbs, self.flush_data(), flush_utxos, size_remaining)
+        else:
+            await run_in_thread(self.db.flush_dbs, self.flush_data(), flush_utxos, size_remaining)
 
     async def check_cache_size_loop(self):
         '''Signal to flush caches if they get too big.'''
@@ -831,7 +838,10 @@ class BlockProcessor:
         
         async def advance_block_only(block):
             '''Process a single block without flushing.'''
-            await run_in_thread(self.advance_block, block)
+            if self.thread_pools:
+                await self.thread_pools.run_in_bp_thread(self.advance_block, block)
+            else:
+                await run_in_thread(self.advance_block, block)
         
         async def do_flush_and_notify(flush_utxos, reason=""):
             '''Flush and notify clients if caught up.'''
