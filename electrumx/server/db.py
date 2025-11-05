@@ -972,17 +972,57 @@ class DB:
         transactions.  By default returns at most 1000 entries.  Set
         limit to None to get them all.
         '''
-        def read_history():
-            tx_nums = list(self.history.get_txnums(hashX, limit))
-            fs_tx_hash = self.fs_tx_hash
-            return [fs_tx_hash(tx_num) for tx_num in tx_nums]
-
-        while True:
-            history = await run_in_thread(read_history)
-            if all(hash is not None for hash, height in history):
-                return history
+        # First, get the transaction numbers (fast, just reading from LevelDB index)
+        def get_tx_nums():
+            return list(self.history.get_txnums(hashX, limit))
+        
+        tx_nums = await run_in_thread(get_tx_nums)
+        if not tx_nums:
+            return []
+        
+        # CRITICAL FIX: Enforce a hard maximum of 10,000 transactions
+        # session.py may pass limit=101,010 (based on MAX_SEND // 99)
+        # Reading 17k+ transactions causes 15+ minute queries and timeout
+        # Limit to 10,000 as recommended by ElectrumX documentation
+        original_count = len(tx_nums)
+        MAX_HISTORY_LIMIT = 10000  # Hard maximum regardless of what caller requests
+        
+        if len(tx_nums) > MAX_HISTORY_LIMIT:
+            self.logger.warning(f'Address has {original_count:,} transactions, limiting to {MAX_HISTORY_LIMIT:,}')
+            tx_nums = tx_nums[:MAX_HISTORY_LIMIT]
+        elif limit and len(tx_nums) > limit:
+            self.logger.warning(f'Address has {original_count:,} transactions, limiting to {limit:,}')
+            tx_nums = tx_nums[:limit]
+        
+        # Read tx hashes in chunks to prevent blocking thread pool
+        # For addresses with 10000 txs: 10000 ÷ 2000 = 5 chunks × ~10s = ~50s total
+        chunk_size = 2000
+        history = []
+        
+        for chunk_start in range(0, len(tx_nums), chunk_size):
+            chunk_end = min(chunk_start + chunk_size, len(tx_nums))
+            chunk_tx_nums = tx_nums[chunk_start:chunk_end]
+            
+            def read_chunk_hashes(chunk=chunk_tx_nums):
+                fs_tx_hash = self.fs_tx_hash
+                return [fs_tx_hash(tx_num) for tx_num in chunk]
+            
+            # Read this chunk in thread pool
+            chunk_results = await run_in_thread(read_chunk_hashes)
+            history.extend(chunk_results)
+            
+            # Yield control to allow other async operations
+            if chunk_end < len(tx_nums):
+                await sleep(0)
+        
+        # Verify all hashes were found (handle reorgs)
+        if not all(hash is not None for hash, height in history):
             self.logger.warning('limited_history: tx hash not found (reorg?), retrying...')
             await sleep(0.25)
+            # Retry entire operation
+            return await self.limited_history(hashX, limit=limit)
+        
+        return history
 
     # -- Undo information
     
