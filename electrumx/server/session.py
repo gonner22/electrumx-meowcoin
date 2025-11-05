@@ -860,9 +860,7 @@ class SessionManager:
                     self._history_hits += 1
                 except KeyError:
                     # We have the lock and it's not cached - do the query
-                    self.logger.debug(f'DB lookup for hashX {hashX.hex()} (cache miss)')
                     result = await self.db.limited_history(hashX, limit=limit)
-                    self.logger.debug(f'DB lookup completed for hashX {hashX.hex()} ({len(result)} entries)')
                     cost += 0.1 + len(result) * 0.001
                     if len(result) >= limit:
                         result = RPCError(BAD_REQUEST, 'history too large', cost=cost)
@@ -1550,9 +1548,7 @@ class ElectrumX(SessionBase):
 
         scripthash: the SHA256 hash of the script to subscribe to'''
         hashX = scripthash_to_hashX(scripthash)
-        self.logger.debug(f'subscribing to scripthash {scripthash} (session {self.session_id})')
         result = await self.hashX_subscribe(hashX, scripthash)
-        self.logger.debug(f'subscription completed for scripthash {scripthash} (session {self.session_id})')
         return result
 
     async def scripthash_unsubscribe(self, scripthash):
