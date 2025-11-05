@@ -6,6 +6,7 @@
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 
 class ThreadPools:
@@ -51,7 +52,9 @@ class ThreadPools:
         '''
         if self._loop is None:
             raise RuntimeError('ThreadPools not set up. Call setup() first.')
-        return await self._loop.run_in_executor(self.bp_executor, func, *args)
+        if args:
+            func = partial(func, *args)
+        return await self._loop.run_in_executor(self.bp_executor, func)
     
     async def run_in_client_thread(self, func, *args):
         '''Run a function in the client request thread pool.
@@ -64,7 +67,9 @@ class ThreadPools:
         '''
         if self._loop is None:
             raise RuntimeError('ThreadPools not set up. Call setup() first.')
-        return await self._loop.run_in_executor(self.client_executor, func, *args)
+        if args:
+            func = partial(func, *args)
+        return await self._loop.run_in_executor(self.client_executor, func)
     
     def shutdown(self):
         '''Shutdown both thread pools.'''
