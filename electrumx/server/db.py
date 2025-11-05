@@ -848,15 +848,21 @@ class DB:
         This function reads headers from disk (all 120 bytes after KAWPOW activation)
         and removes padding from AuxPOW headers (returns 80 bytes) before sending to clients.
         MeowPow headers are returned as-is (120 bytes).
+        
+        Optimized to avoid repeated function calls and use efficient byte concatenation.
         '''
-        result = b''
+        # Use list + join instead of repeated concatenation (O(n) vs O(n²))
+        result_parts = []
         p = 0
         h = start_height
-        processed_count = 0
+        
+        # Cache constants to avoid repeated attribute lookups
+        kawpow_height = self.coin.KAWPOW_ACTIVATION_HEIGHT
+        auxpow_height = self.coin.AUXPOW_ACTIVATION_HEIGHT
         
         while p < len(headers):
             # Each header in file is 120 bytes (after KAWPOW activation)
-            if h >= self.coin.KAWPOW_ACTIVATION_HEIGHT:
+            if h >= kawpow_height:
                 header_in_file = headers[p:p + 120]
                 expected_size = 120
                 p += 120
@@ -868,14 +874,26 @@ class DB:
             # Check if we have enough data
             if len(header_in_file) < expected_size:
                 break
-                
-            # Unpad if needed - returns 80 bytes for AuxPOW, 120 bytes for MeowPow
-            header_to_send = self._unpad_auxpow_header(header_in_file, h)
-            result += header_to_send
+            
+            # Inline unpadding logic to avoid function call overhead
+            # Only check AuxPOW if we're at or past activation height
+            if h >= auxpow_height and len(header_in_file) >= 4:
+                # Check if this is an AuxPOW header (version bit set)
+                version_int = int.from_bytes(header_in_file[:4], byteorder='little')
+                if version_int & (1 << 8):  # AuxPOW version bit
+                    # Return only first 80 bytes, remove padding
+                    result_parts.append(header_in_file[:80])
+                else:
+                    # MeowPow header, use full 120 bytes
+                    result_parts.append(header_in_file)
+            else:
+                # Before AuxPOW activation, return as-is
+                result_parts.append(header_in_file)
+            
             h += 1
-            processed_count += 1
         
-        return result
+        # Single concatenation at the end (O(n) total instead of O(n²))
+        return b''.join(result_parts)
 
     async def raw_header(self, height):
         '''Return the binary header at the given height.'''
