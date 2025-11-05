@@ -1011,12 +1011,12 @@ class DB:
         if not tx_nums:
             return []
         
-        # CRITICAL FIX: Enforce a hard maximum of 10,000 transactions
+        # CRITICAL FIX: Enforce a hard maximum of 30,000 transactions
         # session.py may pass limit=101,010 (based on MAX_SEND // 99)
         # Reading 17k+ transactions causes 15+ minute queries and timeout
-        # Limit to 10,000 as recommended by ElectrumX documentation
+        # Limit to 30,000 to provide complete history for most wallets
         original_count = len(tx_nums)
-        MAX_HISTORY_LIMIT = 10000  # Hard maximum regardless of what caller requests
+        MAX_HISTORY_LIMIT = 30000  # Hard maximum regardless of what caller requests
         
         if len(tx_nums) > MAX_HISTORY_LIMIT:
             self.logger.warning(f'Address has {original_count:,} transactions, limiting to {MAX_HISTORY_LIMIT:,}')
@@ -1026,8 +1026,8 @@ class DB:
             tx_nums = tx_nums[:limit]
         
         # Read tx hashes in chunks to prevent blocking thread pool
-        # For addresses with 10000 txs: 10000 ÷ 2000 = 5 chunks × ~10s = ~50s total
-        chunk_size = 2000
+        # For addresses with 30000 txs: 30000 ÷ 3000 = 10 chunks × ~10s = ~100s total
+        chunk_size = 3000
         history = []
         
         for chunk_start in range(0, len(tx_nums), chunk_size):
