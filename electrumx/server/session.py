@@ -153,8 +153,6 @@ class SessionManager:
         self._merkle_lookups = 0
         self._merkle_hits = 0
         self.estimatefee_cache = pylru.lrucache(300000)
-        # Lock to serialize concurrent requests for same hashX
-        self._history_locks = {}  # hashX -> asyncio.Lock
         self.notified_height = None
         self.hsub_results = None
         self._sslc = None
@@ -847,26 +845,11 @@ class SessionManager:
             result = self._history_cache[hashX]
             self._history_hits += 1
         except KeyError:
-            # Use a lock to serialize requests for the same hashX
-            # This prevents multiple concurrent queries for the same address
-            # which causes severe LevelDB lock contention and thread pool saturation
-            # Use setdefault() to atomically get-or-create lock (avoids race condition)
-            lock = self._history_locks.setdefault(hashX, asyncio.Lock())
-            
-            async with lock:
-                # Check cache again - another session may have fetched it while we waited
-                try:
-                    result = self._history_cache[hashX]
-                    self._history_hits += 1
-                except KeyError:
-                    # We have the lock and it's not cached - do the query
-                    result = await self.db.limited_history(hashX, limit=limit)
-                    cost += 0.1 + len(result) * 0.001
-                    if len(result) >= limit:
-                        result = RPCError(BAD_REQUEST, 'history too large', cost=cost)
-                    # Cache successful results only
-                    if not isinstance(result, Exception):
-                        self._history_cache[hashX] = result
+            result = await self.db.limited_history(hashX, limit=limit)
+            cost += 0.1 + len(result) * 0.001
+            if len(result) >= limit:
+                result = RPCError(BAD_REQUEST, 'history too large', cost=cost)
+            self._history_cache[hashX] = result
 
         if isinstance(result, Exception):
             raise result
